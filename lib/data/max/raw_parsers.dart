@@ -84,6 +84,74 @@ class RawParsers {
     return m?.group(0);
   }
 
+  /// Достаёт id чатов из сырого (распакованного) тела LOGIN, когда compact-
+  /// msgpack чатов не декодируется целиком. Порт `extract_chat_ids_from_login_raw`
+  /// из maxclient: ключ "id" (\xA2id) с числом, рядом с которым в пределах ~120
+  /// байт стоит маркер типа DIALOG/CHAT/CHANNEL; плюс ключ "chatId" (\xA6chatId).
+  static List<int> extractChatIds(Uint8List data) {
+    final result = <int>[];
+    final seen = <int>{};
+    void add(int? v) {
+      if (v != null && v != 0 && seen.add(v)) result.add(v);
+    }
+
+    bool matchAt(int i, List<int> pat) {
+      if (i + pat.length > data.length) return false;
+      for (var j = 0; j < pat.length; j++) {
+        if (data[i + j] != pat[j]) return false;
+      }
+      return true;
+    }
+
+    int? readNum(int p) {
+      if (p >= data.length) return null;
+      final typ = data[p];
+      if (typ == 0xD2 && p + 5 <= data.length) {
+        return ByteData.sublistView(data, p + 1, p + 5).getInt32(0, Endian.big);
+      }
+      if (typ == 0xD3 && p + 9 <= data.length) {
+        return ByteData.sublistView(data, p + 1, p + 9).getInt64(0, Endian.big);
+      }
+      return null;
+    }
+
+    const idKey = [0xA2, 0x69, 0x64]; // \xA2 "id"
+    const chatIdKey = [0xA6, 0x63, 0x68, 0x61, 0x74, 0x49, 0x64]; // \xA6 "chatId"
+    const dialog = [0x44, 0x49, 0x41, 0x4C, 0x4F, 0x47]; // DIALOG
+    const chat = [0x43, 0x48, 0x41, 0x54]; // CHAT
+    const channel = [0x43, 0x48, 0x41, 0x4E, 0x4E, 0x45, 0x4C]; // CHANNEL
+
+    bool typeMarkerWithin(int from, int window) {
+      final end = (from + window) < data.length ? (from + window) : data.length;
+      for (var i = from; i < end; i++) {
+        if (matchAt(i, dialog) || matchAt(i, chat) || matchAt(i, channel)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    for (var i = 0; i < data.length; i++) {
+      if (matchAt(i, idKey)) {
+        final p = i + idKey.length;
+        final typ = p < data.length ? data[p] : 0;
+        if (typ == 0xD2 || typ == 0xD3) {
+          final value = readNum(p);
+          if (value != null) {
+            final valueEnd = p + 1 + (typ == 0xD2 ? 4 : 8);
+            if (typeMarkerWithin(valueEnd, 120)) add(value);
+          }
+        }
+      }
+      if (matchAt(i, chatIdKey)) {
+        final p = i + chatIdKey.length;
+        final typ = p < data.length ? data[p] : 0;
+        if (typ == 0xD2 || typ == 0xD3) add(readNum(p));
+      }
+    }
+    return result;
+  }
+
   static int indexOf(Uint8List haystack, Uint8List needle) => _indexOf(
     haystack,
     needle,

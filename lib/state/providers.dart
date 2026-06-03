@@ -76,10 +76,12 @@ final messagesRepositoryProvider = FutureProvider<MessagesRepository>((ref) asyn
 
 final syncRepositoryProvider = FutureProvider<SyncRepository>((ref) async {
   final db = await ref.watch(appDatabaseProvider.future);
+  final chats = await ref.watch(chatsRepositoryProvider.future);
   return SyncRepository(
     client: ref.watch(maxClientProvider),
     db: db,
     storage: ref.watch(secureStorageProvider),
+    chats: chats,
     logger: ref.watch(loggerProvider),
   );
 });

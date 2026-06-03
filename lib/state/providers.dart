@@ -10,6 +10,7 @@ import '../data/repositories/chats_repository.dart';
 import '../data/repositories/contacts_repository.dart';
 import '../data/repositories/media_repository.dart';
 import '../data/repositories/messages_repository.dart';
+import '../data/repositories/sync_repository.dart';
 import '../data/repositories/upload_repository.dart';
 
 final loggerProvider = Provider<Logger>((ref) {
@@ -71,6 +72,16 @@ final messagesRepositoryProvider = FutureProvider<MessagesRepository>((ref) asyn
   await repo.start();
   ref.onDispose(repo.stop);
   return repo;
+});
+
+final syncRepositoryProvider = FutureProvider<SyncRepository>((ref) async {
+  final db = await ref.watch(appDatabaseProvider.future);
+  return SyncRepository(
+    client: ref.watch(maxClientProvider),
+    db: db,
+    storage: ref.watch(secureStorageProvider),
+    logger: ref.watch(loggerProvider),
+  );
 });
 
 final chatsRepositoryProvider = FutureProvider<ChatsRepository>((ref) async {

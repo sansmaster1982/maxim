@@ -56,6 +56,11 @@ class SecureStorage {
   /// wipe() при logout НЕ входит.
   Future<void> deleteDeviceId() => _backend.delete(key: AppMeta.deviceIdKey);
 
+  /// Тема оформления ('system'|'light'|'dark'). НЕ стирается в wipe().
+  Future<String?> readThemeMode() => _backend.read(key: AppMeta.themeModeKey);
+  Future<void> writeThemeMode(String mode) =>
+      _backend.write(key: AppMeta.themeModeKey, value: mode);
+
   Future<void> wipe() async {
     await deleteToken();
     await deleteMyUserId();

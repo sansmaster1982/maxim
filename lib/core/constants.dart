@@ -62,4 +62,7 @@ class AppMeta {
   /// устройство), переустановку — нет. Регенерация при каждом запуске
   /// выглядит для антифрода MAX как поток новых устройств на одном номере.
   static const String deviceIdKey = 'max_device_id';
+
+  /// Выбранная тема оформления: 'system' | 'light' | 'dark'. Переживает logout.
+  static const String themeModeKey = 'maxim_theme_mode';
 }

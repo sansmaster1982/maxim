@@ -33,6 +33,10 @@
 
 `AppDatabase.searchMessages(query)` — поиск по тексту во всех чатах. SQLite `LOWER()` кириллицу не приводит к нижнему регистру, поэтому регистронезависимость делаем в Dart (Unicode-aware `toLowerCase`) над 2000 свежих сообщений. `messageSearchProvider` (family по запросу). В `ChatsListScreen` при поиске список делится на секции «Чаты» и «Сообщения», тап по найденному сообщению открывает чат. Появилась инфраструктура DB-тестов (in-memory ffi, `AppDatabase.forDb`/`createSchemaForTest`); `database_search_test` — 2 кейса (кириллица регистронезависимо, лимит).
 
+## Тема оформления (2026-06-04)
+
+Ручной выбор темы (системная/светлая/тёмная) с персистом в secure storage (`themeModeProvider`, не стирается при logout). `app.dart` watch'ит провайдер, в настройках — выбор через диалог. Чистый маппинг `themeModeFromString`/`toString` покрыт `theme_controller_test` (3 кейса).
+
 ## Осталось в этапе
 
 - Реакции (отправка) — опкод отправки не реверснут, без догадок не делаем.

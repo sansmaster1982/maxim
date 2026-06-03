@@ -380,6 +380,12 @@ class AppDatabase {
     );
   }
 
+  /// Удалить сообщение по серверному id (push NOTIF_MSG_DELETE op 142).
+  /// Возвращает число удалённых строк (0 если такого сообщения локально нет).
+  Future<int> deleteMessageByServerId(int serverId) async {
+    return _db.delete('messages', where: 'id = ?', whereArgs: [serverId]);
+  }
+
   // ──────────────────────── contacts ───────────────────────
 
   Future<List<MaxContact>> contacts() async {

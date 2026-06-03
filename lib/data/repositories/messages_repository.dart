@@ -14,6 +14,7 @@ import '../max/max_client.dart';
 import '../max/models/attach.dart';
 import '../max/models/incoming_message.dart';
 import '../max/models/message.dart';
+import '../max/models/push_event.dart';
 import '../max/models/upload_input.dart';
 import 'upload_repository.dart';
 
@@ -41,6 +42,7 @@ class MessagesRepository {
   static const _maxAttempts = 5;
 
   StreamSubscription<IncomingMessage>? _pushSub;
+  StreamSubscription<MaxPushEvent>? _eventSub;
   StreamSubscription<MaxConnectionState>? _stateSub;
   bool _draining = false;
   final _onChat = StreamController<int>.broadcast();
@@ -51,6 +53,9 @@ class MessagesRepository {
   Future<void> start() async {
     _pushSub ??= client.incomingStream.listen(_onPush, onError: (e) {
       _log.w('push stream error: $e');
+    });
+    _eventSub ??= client.pushEvents.listen(_onEvent, onError: (e) {
+      _log.w('event stream error: $e');
     });
     // Подписываемся на состояние транспорта — при выходе в connected
     // дренируем outbox. Установка подписки не блокирует репозиторий.
@@ -69,6 +74,8 @@ class MessagesRepository {
   Future<void> stop() async {
     await _pushSub?.cancel();
     _pushSub = null;
+    await _eventSub?.cancel();
+    _eventSub = null;
     await _stateSub?.cancel();
     _stateSub = null;
   }
@@ -660,6 +667,28 @@ class MessagesRepository {
       await client.typing(chatId, isTyping: active);
     } catch (e) {
       _log.d('typing swallowed: $e');
+    }
+  }
+
+  /// Обработка типизированных push-событий (op 130/142/155/293). БД мутируем
+  /// только на явном удалении по серверному id; read/reactions/transcription
+  /// прокинуты на будущее (схемы payload не подтверждены — без догадок).
+  Future<void> _onEvent(MaxPushEvent ev) async {
+    final chatId = ev.chatId;
+    if (chatId == null) return;
+    switch (ev.kind) {
+      case MaxPushKind.deleted:
+        var changed = false;
+        for (final id in ev.messageIds) {
+          final n = await db.deleteMessageByServerId(id);
+          if (n > 0) changed = true;
+        }
+        if (changed) _onChat.add(chatId);
+        break;
+      case MaxPushKind.read:
+      case MaxPushKind.reactions:
+      case MaxPushKind.transcription:
+        break;
     }
   }
 

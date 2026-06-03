@@ -12,6 +12,7 @@ import '../../core/errors.dart';
 import 'lz4_block.dart';
 import 'max_codec.dart';
 import 'models/incoming_message.dart';
+import 'models/push_event.dart';
 import 'raw_parsers.dart';
 
 /// Колбэк для отладки push-фреймов (как `on_push_debug` в Python-версии).
@@ -97,11 +98,16 @@ class MaxClient {
   bool _closed = false;
   final _pending = <int, Completer<MaxFrame>>{};
   final _pushCtrl = StreamController<IncomingMessage>.broadcast();
+  final _eventCtrl = StreamController<MaxPushEvent>.broadcast();
   final _stateCtrl = StreamController<MaxConnectionState>.broadcast();
   MaxConnectionState _state = MaxConnectionState.disconnected;
   final _bufferBuilder = BytesBuilder(copy: false);
 
   Stream<IncomingMessage> get incomingStream => _pushCtrl.stream;
+
+  /// Типизированные server-push события кроме новых сообщений: read (130),
+  /// deleted (142), reactions (155), transcription (293). См. classifyPushEvent.
+  Stream<MaxPushEvent> get pushEvents => _eventCtrl.stream;
   Stream<MaxConnectionState> get connectionState => _stateCtrl.stream;
   MaxConnectionState get currentState => _state;
   String? get token => _token;
@@ -716,6 +722,11 @@ class MaxClient {
       final msg = _parsePush(frame);
       if (msg != null && !_pushCtrl.isClosed) {
         _pushCtrl.add(msg);
+      }
+      // Не-сообщения (read/delete/reactions/transcription) — отдельным потоком.
+      final ev = classifyPushEvent(opcode, decoded, body);
+      if (ev != null && !_eventCtrl.isClosed) {
+        _eventCtrl.add(ev);
       }
     }
   }

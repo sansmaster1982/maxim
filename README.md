@@ -1,190 +1,80 @@
-# Maxim — кросс-платформенный клиент MAX
+# maxim — клиент мессенджера MAX на Flutter
 
-Форк-клиент мессенджера MAX (api.oneme.ru) для Android и iOS, написанный
-на Flutter. Использует реверс-инжиниринг протокола из проекта
-`telega-to-max` (Python).
+Сторонний клиент мессенджера MAX (`api.oneme.ru`), целевая платформа iOS, кодовая база на Flutter (запускается также на Android и Windows-desktop для разработки). Говорит с боевой сетью MAX по родному бинарному протоколу — 10-байтный кадр + msgpack + распаковка тела (LZ4). Трафик неотличим от официального клиента, поэтому идёт там же, где MAX не режется оператором.
 
-## Статус
+Протокол восстановлен из наработок: Python-клиент `telega-to-max`, пакет `maxclient` (реверс десктопного MAX) и декомпил APK. Сводная спецификация — [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-- 0.1.0, MVP-фундамент.
-- Текстовые сообщения: отправка, приём (push), история, поиск контактов
-  по номеру, авторизация (SMS + 2FA), повторный вход по сохранённому
-  токену.
-- Локальное хранилище: SQLite + Secure Storage для токена.
-- iOS и Android из одной кодовой базы.
-- Что не сделано: загрузка/скачивание медиа, голосовые, звонки, реакции,
-  группы (видны как обычный чат, но без специфики), системные события,
-  push-нотификации через FCM/APNs.
+## Что работает
+
+- Авторизация: SMS + 2FA, вход по готовому токену, восстановление сессии. Стабильный `deviceId`, официально-выглядящий `userAgent` (anti-ban).
+- Список чатов наполняется из снэпшота LOGIN (`interactive=true`) + добор названий через `CHAT_INFO`; байт-скан id чатов из сырого ответа как fallback.
+- Сообщения: отправка (полный payload `cid/detectShare/notify`), приём (push), пагинация истории, редактирование (op 67), статусы/outbox с повторной отправкой.
+- Медиа: фото/видео/файлы — двухступенчатый upload, скачивание, галерея чата (op 51), транскрипция голосовых (op 202).
+- Контакты: импорт адресной книги, поиск по номеру (троттлинг как anti-spam).
+- Push-события по опкодам: удаление (142) применяется к БД; read/reactions/transcription доставляются типизированным потоком.
+- Системные события чата (`_type=CONTROL`) — человекочитаемый текст.
+- Активные сессии: список устройств (op 96), завершение чужой сессии (op 97).
+- Глобальный поиск по тексту сообщений (Unicode-aware) и по названиям чатов.
+- Устойчивость: авто-реконнект с backoff, DNS-over-HTTPS fallback (`1.1.1.1`/`8.8.8.8` по IP с сохранением SNI и проверки сертификата) против DNS-блокировки.
+- iOS: Cupertino-переходы со свайпом-назад, адаптивные контролы, `Info.plist` с разрешениями, display name `MAX`.
 
 ## Стек
 
-- Flutter 3.29+, Dart 3.7+.
-- State: Riverpod 2.
-- БД: sqflite. Токен: flutter_secure_storage.
-- Сеть: SecureSocket (TLS), msgpack_dart.
+Flutter 3.29+/Dart 3.7+, Riverpod 2, sqflite (+ `sqflite_common_ffi` на desktop), `flutter_secure_storage`, `msgpack_dart`, `http`, `cached_network_image`, `image_picker`/`file_picker`, `flutter_contacts`.
 
 ## Структура
 
 ```
 lib/
-  core/                константы протокола и исключения
+  core/                 константы протокола (host, proto v10, app 26.15.0), ошибки
   data/
-    max/               клиент протокола MAX
-      max_client.dart  TCP+TLS, фреймы, опкоды, push
-      max_codec.dart   упаковка/распаковка кадров
-      raw_parsers.dart парсеры msgpack-полей по сырому байту
-      models/          IncomingMessage, MaxChat, MaxMessage, MaxContact
-    local/             SQLite + secure storage
-    repositories/      auth/chats/contacts/messages
-  state/               Riverpod-провайдеры и контроллеры
-  ui/
-    screens/           splash, login, chats, chat, contacts, settings
-    widgets/           message_bubble, chat_input
-    theme/             светлая/тёмная тема Material 3
+    max/
+      max_client.dart   TLS+DoH, кадры, опкоды, push-потоки
+      max_codec.dart    упаковка/распаковка кадров, msgpack
+      lz4_block.dart    чистый Dart LZ4-декомпрессор тела кадра
+      snapshot.dart     разбор снэпшота LOGIN -> чаты/контакты/профиль
+      control_event.dart текст системных событий CONTROL
+      raw_parsers.dart  байтовые парсеры (extractChatIds и т.п.)
+      device_profile.dart официальный userAgent (anti-ban)
+      models/           message, chat, contact, attach, session, push_event, ...
+    local/              sqflite (схема v6) + secure storage
+    repositories/       auth, chats, messages, contacts, media, upload, sync
+  state/                Riverpod-провайдеры и контроллеры
+  ui/                   screens (splash/login/chats/chat/profile/contacts/
+                        media/sessions/settings), widgets, theme (палитра MAX)
+bin/maxim_cli.dart      headless-клиент на том же MaxClient
+docs/                   PROTOCOL, MEDIA_OPCODES, ROADMAP-этапы (STAGE_XX), GITHUB
 ```
 
-## Опкоды протокола MAX
+## Сборка и запуск
 
-Известны и реализованы:
-
-| Опкод | Назначение                  |
-|-------|-----------------------------|
-| 6     | INIT (handshake)            |
-| 16    | PROFILE (мой профиль)       |
-| 17    | AUTH_REQUEST (SMS)          |
-| 18    | AUTH_CONFIRM (код)          |
-| 19    | LOGIN (по токену)           |
-| 32    | CONTACT_INFO (по id)        |
-| 46    | CONTACT_INFO_BY_PHONE       |
-| 48    | CHAT_INFO                   |
-| 49    | CHAT_HISTORY                |
-| 51    | CHAT_MEDIA (галерея чата)   |
-| 64    | SEND_MESSAGE (+attaches)    |
-| 65    | TYPING                      |
-| 67    | MSG_EDIT                    |
-| 80    | PHOTO_UPLOAD                |
-| 81    | STICKER_UPLOAD              |
-| 82    | VIDEO_UPLOAD                |
-| 83    | VIDEO_PLAY                  |
-| 87    | FILE_UPLOAD                 |
-| 88    | FILE_DOWNLOAD               |
-| 115   | 2FA_PASSWORD                |
-| 202   | TRANSCRIBE_MEDIA            |
-
-Детальная таблица с источниками — `docs/MEDIA_OPCODES.md`. Журнал
-прогресса разработки — `docs/PROGRESS.md`.
-
-## Установка и запуск
-
-Зависимости:
 ```
 flutter pub get
+flutter analyze        # чисто
+flutter test           # 57 кейсов
 ```
 
-### Android (требуется Android SDK + Java 17)
+- iOS (нужен Mac + Xcode): `cd ios && pod install && cd .. && flutter run -d <id>`.
+- Windows desktop (для отладки UI): включить Developer Mode (`start ms-settings:developers`), затем `flutter run -d windows`.
+
+### Проверка ядра без Mac (headless)
+
+`bin/maxim_cli.dart` использует тот же `MaxClient`. Положи auth-token в `max_token.txt` и:
 
 ```
-flutter run -d <device-id>
-# или
-flutter build apk --debug
+dart run bin/maxim_cli.dart
 ```
 
-Если `flutter build apk` падает с `Unable to establish loopback connection`
-в текущем терминале — собирай через Android Studio: File → Open → выбрать
-папку `android/`, Build → Build APK(s). Это известная проблема среды
-(JDK NIO UDS), Android Studio её обходит собственным Gradle-daemon.
+После входа печатается `Снэпшот логина: ... чатов(декод)=N ...`; команда `chats` — список, `send/hist/find/me` — операции. Это прямая проверка на боевом сервере без GUI. Заливка на GitHub — [docs/GITHUB.md](docs/GITHUB.md).
 
-### iOS (требуется macOS + Xcode)
+## Известные ограничения
 
-```
-cd ios && pod install && cd ..
-flutter run -d <device-id>
-```
+- Отправка реакций — опкод не реверснут (не угадываем).
+- Точные схемы payload push read/reactions/transcription не подтверждены: события доставляются, но в БД пишется только безопасное удаление.
+- zstd-кадры (`cof=0xFF`) не распаковываются (редки; зрелого pure-Dart zstd нет).
+- Пиксель-в-пиксель совпадение с iOS-обликом MAX требует референс-скриншотов и Mac для визуальной итерации.
+- `app_version` (`26.15.0`) при мажорном обновлении официального MAX может потребовать поднятия.
 
-### Windows desktop (Flutter UI)
+## Дисклеймер
 
-Требует **Developer Mode** включённого в Windows (для symlink-плагинов).
-
-1. `start ms-settings:developers` → включить «Режим разработчика».
-2. Перелогиниться (или открыть свежий терминал — privilege-token обновляется только в новом logon-сеансе).
-3. `flutter build windows --debug`
-4. Артефакт: `build/windows/x64/runner/Debug/maxim_messenger.exe`
-
-На desktop:
-- Импорт контактов и снимок с камеры недоступны (платформенные плагины).
-- Текст, история, файлы через file_picker — работают.
-- SQLite через `sqflite_common_ffi` (нативная DLL, не Android).
-
-### CLI (standalone EXE, без Flutter)
-
-`bin/maxim_cli.dart` — полнофункциональный консольный клиент, использует
-тот же `MaxClient`. Не требует Developer Mode и Android-toolchain.
-
-```
-dart compile exe bin/maxim_cli.dart -o build/maxim_cli.exe
-```
-
-Получается ~6 МБ AOT-скомпилированный exe. Smoke:
-
-```
-build/maxim_cli.exe --probe      # TLS-хендшейк + INIT, без логина
-build/maxim_cli.exe --version
-build/maxim_cli.exe               # интерактивный REPL
-```
-
-REPL-команды:
-- `send <chatId> <text...>` — отправить сообщение
-- `hist <chatId> [count]` — последние N сообщений
-- `find <phone>` — найти контакт по номеру
-- `me` — мой профиль
-- `quit` — выход
-
-Токен после первого логина кладётся в `max_token.txt` рядом с exe.
-
-## Авторизация
-
-1. Открыть приложение, ввести номер в формате `+79991234567`.
-2. Ввести код из SMS.
-3. Если у аккаунта включён пароль 2FA, ввести его.
-
-После успешного входа токен лежит в Keystore/Keychain (Secure Storage).
-При повторном запуске сессия восстанавливается автоматически.
-
-## Версии протокола
-
-Зашиты в `lib/core/constants.dart`:
-```
-host = api.oneme.ru
-proto_version = 10
-app_version = 26.11.0
-```
-
-Когда официальное приложение MAX выпустит мажорное обновление, может
-потребоваться поднять `app_version`.
-
-## Безопасность
-
-- Токен хранится в Android Keystore / iOS Keychain.
-- Сетевой трафик к `api.oneme.ru` идёт через TLS.
-- Локальная SQLite — без шифрования (на телефоне защищена системным
-  шифрованием диска). Если нужен прицельный E2E — добавить SQLCipher.
-
-## Git
-
-Репозиторий инициализирован. Откат:
-```
-git log --oneline
-git checkout <commit>
-```
-
-Для нормальной работы — ветка `main`, фичевые ветки от неё.
-
-## TODO следующих итераций
-
-1. Опкоды медиа (поднять из декомпила APK).
-2. Push-нотификации (FCM Android, APNs iOS).
-3. Голосовые сообщения.
-4. Реакции, ответы на сообщение, пересылка.
-5. Группы (members, аватары, права).
-6. Тайпинг-индикатор от собеседника (приходит ли в push — проверить).
-7. Дешифровка ASN.1/E2E если он есть в MAX (пока не проверено).
+Учебный/исследовательский протокол-совместимый клиент для собственного аккаунта MAX. Использует реверс-инжиниринг протокола; не аффилирован с MAX/VK. Антифрод MAX работает по номеру/IP/поведению — детали и меры в [docs/PROGRESS.md](docs/PROGRESS.md) (Этап 7).

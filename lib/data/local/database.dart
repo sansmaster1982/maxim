@@ -29,6 +29,12 @@ class AppDatabase {
     return _instance!;
   }
 
+  /// Только для тестов: обернуть уже открытую БД (например in-memory ffi).
+  static AppDatabase forDb(Database db) => AppDatabase._(db);
+
+  /// Только для тестов: создать схему версии 6 в переданной БД.
+  static Future<void> createSchemaForTest(Database db) => _onCreate(db, 6);
+
   static Future<void> _onUpgrade(
     Database db,
     int oldVersion,
@@ -309,6 +315,28 @@ class AppDatabase {
           ],
         ),
     ];
+  }
+
+  /// Глобальный поиск по тексту сообщений. SQLite LOWER() кириллицу не трогает,
+  /// поэтому регистронезависимость делаем в Dart (Unicode-aware toLowerCase):
+  /// берём до 2000 свежих сообщений и фильтруем по подстроке.
+  Future<List<MaxMessage>> searchMessages(String query, {int limit = 50}) async {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return const [];
+    final rows = await _db.query(
+      'messages',
+      orderBy: 'time_ms DESC',
+      limit: 2000,
+    );
+    final out = <MaxMessage>[];
+    for (final r in rows) {
+      final t = (r['text'] as String?) ?? '';
+      if (t.toLowerCase().contains(q)) {
+        out.add(MaxMessage.fromDbRow(r));
+        if (out.length >= limit) break;
+      }
+    }
+    return out;
   }
 
   Future<int> insertMessage(MaxMessage m) async {

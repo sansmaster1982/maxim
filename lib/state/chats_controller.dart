@@ -59,6 +59,14 @@ final chatsListProvider =
   ChatsListController.new,
 );
 
+/// Глобальный поиск по тексту сообщений во всех чатах. Пустой запрос — пусто.
+final messageSearchProvider =
+    FutureProvider.family<List<MaxMessage>, String>((ref, query) async {
+  if (query.trim().isEmpty) return const [];
+  final db = await ref.watch(appDatabaseProvider.future);
+  return db.searchMessages(query);
+});
+
 /// Сообщения конкретного чата. Если есть локальные - отдаём сразу,
 /// параллельно подтягиваем свежие с сервера.
 class ChatHistoryController extends FamilyAsyncNotifier<List<MaxMessage>, int> {

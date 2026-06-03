@@ -29,9 +29,12 @@
 
 `MaxClient.sessionsInfo()` (96) и `sessionsClose(ids)` (97). Чистый парсер `parseSessions` (модель `MaxSession`, терпим к именам полей: id/sessionId, name/appName/deviceName, device/deviceType/platform, lastSeen/lastActiveTime, isCurrent), покрыт `session_test` (4 кейса). UI: `SessionsScreen` (список устройств, завершение чужой сессии), вход из «Настройки → Активные сессии».
 
+## Глобальный поиск по сообщениям (2026-06-04)
+
+`AppDatabase.searchMessages(query)` — поиск по тексту во всех чатах. SQLite `LOWER()` кириллицу не приводит к нижнему регистру, поэтому регистронезависимость делаем в Dart (Unicode-aware `toLowerCase`) над 2000 свежих сообщений. `messageSearchProvider` (family по запросу). В `ChatsListScreen` при поиске список делится на секции «Чаты» и «Сообщения», тап по найденному сообщению открывает чат. Появилась инфраструктура DB-тестов (in-memory ffi, `AppDatabase.forDb`/`createSchemaForTest`); `database_search_test` — 2 кейса (кириллица регистронезависимо, лимит).
+
 ## Осталось в этапе
 
 - Реакции (отправка) — опкод отправки не реверснут, без догадок не делаем.
-- Глобальный поиск по тексту сообщений (поиск по названиям чатов уже работает в списке).
 - zstd-распаковка кадров (`cof=0xFF`) — нет зрелого pure-Dart zstd, FFI тянет нативную зависимость; кадры редки, пока graceful-лог.
 - Точные схемы payload для read/reactions/transcription-push требуют живого pcap (эталонные клиенты их не парсят): события доставляются, но в БД пишется только безопасное удаление.

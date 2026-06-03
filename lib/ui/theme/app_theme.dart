@@ -18,6 +18,20 @@ class MaxColors {
 }
 
 class AppTheme {
+  /// iOS-переходы между экранами на всех платформах: слайд + жест свайпа назад
+  /// (edge-swipe). Применяется ко всем MaterialPageRoute разом — один источник
+  /// нативного для iOS поведения навигации.
+  static const _iosTransitions = PageTransitionsTheme(
+    builders: {
+      TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+      TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+      TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+      TargetPlatform.windows: CupertinoPageTransitionsBuilder(),
+      TargetPlatform.linux: CupertinoPageTransitionsBuilder(),
+      TargetPlatform.fuchsia: CupertinoPageTransitionsBuilder(),
+    },
+  );
+
   static ThemeData light() {
     final base = ThemeData(useMaterial3: true, brightness: Brightness.light);
     final scheme = ColorScheme.fromSeed(
@@ -34,6 +48,7 @@ class AppTheme {
       colorScheme: scheme,
       scaffoldBackgroundColor: scheme.surface,
       dividerColor: MaxColors.dividerLight,
+      pageTransitionsTheme: _iosTransitions,
       appBarTheme: AppBarTheme(
         backgroundColor: scheme.surface,
         foregroundColor: scheme.onSurface,
@@ -108,6 +123,7 @@ class AppTheme {
       colorScheme: scheme,
       scaffoldBackgroundColor: scheme.surface,
       dividerColor: MaxColors.dividerDark,
+      pageTransitionsTheme: _iosTransitions,
       appBarTheme: AppBarTheme(
         backgroundColor: scheme.surface,
         foregroundColor: scheme.onSurface,

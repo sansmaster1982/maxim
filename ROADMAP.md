@@ -20,7 +20,7 @@
   - Полный payload `MSG_SEND` (64): `cid`, `detectShare`, `notify`, `randomId` как у официального клиента.
 - [x] **Этап 2b — Надёжное наполнение списка чатов.** Детали: [docs/STAGE_02b.md](docs/STAGE_02b.md).
   - Кеш сырого тела LOGIN + байт-скан id чатов (`RawParsers.extractChatIds`, порт из maxclient) + добор названий/аватаров через CHAT_INFO (op 48). Двухуровневое наполнение в `SyncRepository`: богатые объекты из декода, плюс id из raw для случаев, когда compact-msgpack не декодируется.
-- [ ] **Этап 3 — iOS-паритет интерфейса.** Cupertino-навигация (swipe-back, SafeArea, Dynamic Island), типографика SF Pro, доводка экранов под облик оригинального MAX.
+- [x] **Этап 3 — Нативный iOS-слой поведения.** Детали: [docs/STAGE_03.md](docs/STAGE_03.md). Cupertino-переходы на всех платформах (edge-swipe-back) через `pageTransitionsTheme`, адаптивные контролы (`Switch.adaptive`, spinner). Палитра уже совпадает с реверс-цветами десктопа MAX. Пиксель-в-пиксель доводка под iOS-облик требует референс-скриншотов и Mac.
 - [ ] **Этап 4 — Готовность iOS-сборки.** `ios/Runner` Info.plist (камера, фото, контакты, микрофон), bundle id, display name `MAX`, иконки, launch screen, заготовка APNs/push.
 - [ ] **Этап 5 — Расширенные функции и устойчивость.** Реакции (send), события групп/каналов (`_type=CONTROL`), поиск, доводка настроек, zstd-распаковка кадров (`cof=0xFF`), DNS-over-HTTPS fallback. Push-опкоды 130/142/155 и inbound typing — требуют живого pcap: эталонные клиенты (bridge.py, maxclient) их не парсят, угадывать поля нельзя.
 - [ ] **Этап 6 — Заливка на GitHub.** `gh auth login` (действие пользователя), создание репозитория, push.

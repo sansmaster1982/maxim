@@ -14,6 +14,8 @@ import 'package:maxim_messenger/core/constants.dart';
 import 'package:maxim_messenger/core/errors.dart';
 import 'package:maxim_messenger/data/max/max_client.dart';
 import 'package:maxim_messenger/data/max/models/incoming_message.dart';
+import 'package:maxim_messenger/data/max/raw_parsers.dart';
+import 'package:maxim_messenger/data/max/snapshot.dart';
 
 Future<void> main(List<String> argv) async {
   stdout.writeln('=== Maxim CLI (proto v${MaxProto.protoVersion}, '
@@ -30,6 +32,7 @@ Future<void> main(List<String> argv) async {
     stdout.writeln('  hist <chatId> [count]');
     stdout.writeln('  find <phone>');
     stdout.writeln('  me');
+    stdout.writeln('  chats');
     stdout.writeln('  quit');
     stdout.writeln('\nФлаги: --version, --help, --probe');
     stdout.writeln('--probe — установить TLS-соединение и сразу выйти.');
@@ -72,6 +75,10 @@ Future<void> main(List<String> argv) async {
     final me = await client.currentProfile();
     stdout.writeln('Вошёл как: id=${me['id']} name=${me['name']}');
 
+    // Сразу показываем, что пришло в снэпшоте логина — прямая проверка
+    // наполнения списка чатов (Этап 2).
+    _printLoginSummary(client);
+
     // Запустим listen в фоне — будет печатать входящие.
     final pushSub = client.incomingStream.listen(_printIncoming);
 
@@ -80,6 +87,7 @@ Future<void> main(List<String> argv) async {
     stdout.writeln('  hist <chatId> [count]    — последние N сообщений');
     stdout.writeln('  find <phone>             — найти контакт по номеру');
     stdout.writeln('  me                       — мой профиль');
+    stdout.writeln('  chats                    — чаты из снэпшота логина');
     stdout.writeln('  quit                     — выход');
 
     final input = stdin.transform(utf8.decoder).transform(const LineSplitter());
@@ -168,8 +176,34 @@ Future<void> _runCommand(MaxClient client, String line) async {
       final me = await client.currentProfile();
       stdout.writeln('Я: $me');
       break;
+    case 'chats':
+      _printLoginSummary(client, verbose: true);
+      break;
     default:
       stderr.writeln('Неизвестная команда: $cmd');
+  }
+}
+
+/// Печатает сводку снэпшота логина — прямая проверка наполнения чатов (Этап 2).
+/// При [verbose] перечисляет сами чаты и id из байт-скана сырого тела.
+void _printLoginSummary(MaxClient client, {bool verbose = false}) {
+  final snap = parseLoginSnapshot(client.lastLoginSnapshot);
+  final raw = client.lastLoginRaw;
+  final scanned = raw != null ? RawParsers.extractChatIds(raw) : const <int>[];
+  stdout.writeln('Снэпшот логина: профиль id=${snap.profileId} '
+      'name=${snap.profileName}; чатов(декод)=${snap.chats.length}, '
+      'контактов=${snap.contacts.length}, id чатов(байт-скан raw)=${scanned.length}');
+  if (verbose) {
+    for (final c in snap.chats) {
+      final preview = (c.lastMessagePreview ?? '').isNotEmpty
+          ? ' — ${c.lastMessagePreview}'
+          : '';
+      stdout.writeln('  [${c.id}] ${c.title ?? "(без названия)"} '
+          'unread=${c.unreadCount}$preview');
+    }
+    if (scanned.isNotEmpty) {
+      stdout.writeln('  id чатов из байт-скана: $scanned');
+    }
   }
 }
 

@@ -600,6 +600,19 @@ class MaxClient {
     };
   }
 
+  /// Список активных сессий/устройств (opcode 96). Ответ парсить parseSessions.
+  Future<Map<String, dynamic>> sessionsInfo() async {
+    final f = await _request(MaxOp.sessionsInfo, {});
+    if (f.cmd != 1) throw MaxError('sessionsInfo cmd=${f.cmd}');
+    return _asMap(f.decoded);
+  }
+
+  /// Завершить указанные сессии (opcode 97).
+  Future<void> sessionsClose(List<int> sessionIds) async {
+    final f = await _request(MaxOp.sessionsClose, {'sessionIds': sessionIds});
+    if (f.cmd != 1) throw MaxError('sessionsClose cmd=${f.cmd}');
+  }
+
   // ───────────────────────── internals ────────────────────────
 
   Future<MaxFrame> _request(

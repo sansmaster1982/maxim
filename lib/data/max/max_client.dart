@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:http/http.dart' as http;
 import 'package:logger/logger.dart';
 import 'package:uuid/uuid.dart';
 
@@ -122,11 +124,7 @@ class MaxClient {
     if (deviceType != null) _deviceType = deviceType;
     _emitState(MaxConnectionState.connecting);
     try {
-      final s = await SecureSocket.connect(
-        MaxProto.host,
-        MaxProto.port,
-        timeout: const Duration(seconds: 15),
-      );
+      final s = await _openSecureSocket(const Duration(seconds: 15));
       s.setOption(SocketOption.tcpNoDelay, true);
       _socket = s;
       _closed = false;
@@ -150,6 +148,60 @@ class MaxClient {
       _emitState(MaxConnectionState.disconnected);
       rethrow;
     }
+  }
+
+  /// Открыть TLS-сокет с DoH-fallback. Если системный DNS не резолвит хост или
+  /// режется провайдером — резолвим api.oneme.ru через DNS-over-HTTPS
+  /// (1.1.1.1/8.8.8.8 по IP) и коннектимся по IP, но TLS-хендшейк идёт с
+  /// server_hostname=api.oneme.ru: SNI и проверка сертификата сохраняются
+  /// (никакого обхода TLS). Порт `_open_raw_socket` из maxclient — помогает
+  /// против DNS-блокировки оператором.
+  Future<SecureSocket> _openSecureSocket(Duration timeout) async {
+    try {
+      return await SecureSocket.connect(
+        MaxProto.host,
+        MaxProto.port,
+        timeout: timeout,
+      );
+    } on SocketException catch (e) {
+      _log.w('прямое подключение к ${MaxProto.host} не удалось ($e); пробуем DoH');
+      final ip = await _dohResolve(MaxProto.host);
+      if (ip == null) {
+        throw MaxNotConnected(
+          'Не удалось разрешить ${MaxProto.host}. Проверьте интернет, DNS или VPN.',
+        );
+      }
+      _log.i('DoH разрешил ${MaxProto.host} -> $ip');
+      final raw = await Socket.connect(ip, MaxProto.port, timeout: timeout);
+      raw.setOption(SocketOption.tcpNoDelay, true);
+      // Соединились по IP, но SNI и проверка сертификата — по реальному хосту.
+      return SecureSocket.secure(raw, host: MaxProto.host);
+    }
+  }
+
+  /// Резолв A-записи через DNS-over-HTTPS. Endpoint'ы заданы по IP, чтобы не
+  /// зависеть от системного DNS. Порт `_doh_resolve` из maxclient.
+  Future<String?> _dohResolve(String host) async {
+    const endpoints = [
+      'https://1.1.1.1/dns-query?name=',
+      'https://8.8.8.8/resolve?name=',
+    ];
+    for (final base in endpoints) {
+      try {
+        final resp = await http
+            .get(
+              Uri.parse('$base$host&type=A'),
+              headers: const {'accept': 'application/dns-json'},
+            )
+            .timeout(const Duration(seconds: 8));
+        if (resp.statusCode != 200) continue;
+        final ip = parseDohAnswer(resp.body);
+        if (ip != null) return ip;
+      } catch (_) {
+        continue;
+      }
+    }
+    return null;
   }
 
   /// Переподключение по сохранённому токену. Не выставляет [_closed].
@@ -868,6 +920,25 @@ class MaxClient {
     if (v is num) return v.toInt();
     return int.tryParse(v.toString());
   }
+}
+
+/// Извлекает первый IPv4 (A-запись, type==1) из JSON-ответа DoH формата
+/// application/dns-json (Cloudflare/Google). Чистая функция — под юнит-тест.
+String? parseDohAnswer(String body) {
+  try {
+    final data = jsonDecode(body);
+    if (data is Map && data['Answer'] is List) {
+      for (final ans in data['Answer'] as List) {
+        if (ans is Map && ans['type'] == 1) {
+          final ip = ans['data']?.toString();
+          if (ip != null && ip.isNotEmpty) return ip;
+        }
+      }
+    }
+  } catch (_) {
+    // невалидный JSON — вернём null
+  }
+  return null;
 }
 
 /// Экспоненциальный backoff: 2s → 4s → 8s → 16s → 32s → 60s (cap).

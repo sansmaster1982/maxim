@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 import '../../core/errors.dart';
 import '../local/database.dart';
 import '../local/secure_storage.dart';
+import '../max/control_event.dart';
 import '../max/max_client.dart';
 import '../max/models/attach.dart';
 import '../max/models/incoming_message.dart';
@@ -117,11 +118,14 @@ class MessagesRepository {
     for (final m in raw) {
       final id = (m['id'] as num?)?.toInt();
       final sender = (m['sender'] as num?)?.toInt();
-      final text = m['text']?.toString() ?? '';
+      var text = m['text']?.toString() ?? '';
       final time = (m['time'] as num?)?.toInt() ??
           DateTime.now().millisecondsSinceEpoch;
       final attRaw = (m['attaches'] ?? m['attachments']) as List?;
       final hasAttaches = attRaw != null && attRaw.isNotEmpty;
+      if (text.isEmpty && attRaw != null) {
+        text = _systemTextFromAttaches(attRaw) ?? text;
+      }
       if (text.isEmpty && !hasAttaches) continue;
       final dir = (myId != null && sender == myId)
           ? MessageDirection.outgoing
@@ -167,6 +171,11 @@ class MessagesRepository {
     for (final r in raw) {
       if (r is! Map) continue;
       final m = r.map((k, v) => MapEntry(k.toString(), v));
+      // CONTROL — системное событие чата, не медиа; в текст оно уже превращено
+      // через controlEventText, как attach не храним.
+      if ((m['_type'] ?? m['type'])?.toString().toUpperCase() == 'CONTROL') {
+        continue;
+      }
       try {
         final a = MaxAttach.fromServer(m);
         await db.insertAttach(
@@ -179,6 +188,18 @@ class MessagesRepository {
         _log.w('persist attach failed: $e');
       }
     }
+  }
+
+  /// Если у сообщения нет текста, но есть CONTROL-attach (системное событие
+  /// чата) — вернуть человекочитаемый текст для показа как системное сообщение.
+  String? _systemTextFromAttaches(List<dynamic> raw) {
+    for (final r in raw) {
+      if (r is Map) {
+        final t = controlEventText(r.map((k, v) => MapEntry(k.toString(), v)));
+        if (t != null) return t;
+      }
+    }
+    return null;
   }
 
   Future<MaxMessage> sendText(
@@ -700,11 +721,15 @@ class MessagesRepository {
     final dir = (myId != null && m.sender == myId)
         ? MessageDirection.outgoing
         : MessageDirection.incoming;
+    var text = m.text;
+    if (text.isEmpty) {
+      text = _systemTextFromAttaches(m.attaches) ?? text;
+    }
     final msg = MaxMessage(
       id: m.messageId,
       chatId: m.chatId,
       senderId: m.sender,
-      text: m.text,
+      text: text,
       timeMs: m.timeMs ?? DateTime.now().millisecondsSinceEpoch,
       direction: dir,
     );

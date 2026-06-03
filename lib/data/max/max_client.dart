@@ -51,6 +51,12 @@ class MaxClient {
   set onAuthInvalid(void Function()? cb) => _authInvalid = cb;
 
   String? _token;
+
+  /// Снэпшот последнего успешного LOGIN (interactive=true): профиль, чаты,
+  /// контакты. Читается SyncRepository для наполнения локальной БД.
+  Map<String, dynamic>? _lastLoginSnapshot;
+  Map<String, dynamic>? get lastLoginSnapshot => _lastLoginSnapshot;
+
   String get deviceId => _deviceId ?? '(unresolved)';
 
   /// Кеш разрешённого deviceId. null до первого [_resolveDeviceId].
@@ -147,7 +153,8 @@ class MaxClient {
     await connect();
     final t = _token;
     if (t != null && t.isNotEmpty) {
-      await login(t);
+      // На реконнекте снэпшот уже в БД — не тянем его снова, экономим трафик.
+      await login(t, interactive: false);
     }
   }
 
@@ -274,21 +281,33 @@ class MaxClient {
     return t;
   }
 
-  /// Логин по сохранённому токену. Возвращает raw payload, оттуда вызывающий
-  /// код может вытащить контакты/чаты при синхронизации.
-  Future<Uint8List> login(String token) async {
-    final f = await _request(MaxOp.login, {
-      'token': token,
-      'interactive': false,
-      'chatsCount': 40,
-      'chatsSync': 0,
-      'contactsSync': 0,
-      'presenceSync': 0,
-      'draftsSync': 0,
-    });
+  /// Логин по токену. При [interactive] = true (первый вход) сервер возвращает
+  /// полный снэпшот — профиль, чаты, контакты (~200+ КБ); при false чаты не
+  /// приходят (проверено в web_demo/bridge.py). Снэпшот кешируется в
+  /// [lastLoginSnapshot] для наполнения БД. Возвращает декодированный снэпшот.
+  Future<Map<String, dynamic>> login(
+    String token, {
+    bool interactive = true,
+  }) async {
+    final f = await _request(
+      MaxOp.login,
+      {
+        'token': token,
+        'interactive': interactive,
+        'chatsCount': 40,
+        'chatsSync': 0,
+        'contactsSync': 0,
+        'presenceSync': 0,
+        'draftsSync': 0,
+      },
+      // Снэпшот большой и едет LZ4-распаковкой — даём запас по времени.
+      timeout: const Duration(seconds: 45),
+    );
     if (f.cmd != 1) throw MaxLoginFailed('LOGIN cmd=${f.cmd}');
     _token = token;
-    return f.body;
+    final snap = _asMap(f.decoded);
+    if (interactive && snap.isNotEmpty) _lastLoginSnapshot = snap;
+    return snap;
   }
 
   // ───────────────────────── messaging ────────────────────────
@@ -299,7 +318,15 @@ class MaxClient {
     List<Map<String, Object?>>? attaches,
     int? replyToId,
   }) async {
-    final message = <String, Object?>{'text': text};
+    // Полный payload официального клиента (см. bridge.py + maxclient):
+    // message.cid — клиентский id (millis), detectShare включает превью
+    // ссылок, notify шлёт нотификацию получателю, randomId == cid для дедупа.
+    final cid = DateTime.now().millisecondsSinceEpoch;
+    final message = <String, Object?>{
+      'cid': cid,
+      'text': text,
+      'detectShare': true,
+    };
     if (attaches != null && attaches.isNotEmpty) {
       message['attaches'] = attaches;
     }
@@ -311,7 +338,8 @@ class MaxClient {
     final f = await _request(MaxOp.sendMessage, {
       'chatId': chatId,
       'message': message,
-      'randomId': DateTime.now().millisecondsSinceEpoch,
+      'notify': true,
+      'randomId': cid,
     });
     if (f.cmd != 1) throw MaxError('send_message cmd=${f.cmd}');
     return _asMap(f.decoded);

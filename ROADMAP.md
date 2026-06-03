@@ -15,11 +15,12 @@
 ## Этапы
 
 - [x] **Этап 1 — Бутстрап.** Перенос `maxim_messenger` в `max iso`, `pub get`, базовая верификация, git init. Детали: [docs/STAGE_01.md](docs/STAGE_01.md).
-- [ ] **Этап 2 — Ядро мессенджинга до рабочего состояния.**
-  - Парсинг снэпшота LOGIN (op 19, `interactive=true`) → запись `chats`/`messages`/`contacts` в локальную БД, наполнение главного экрана.
-  - Обработчики push-опкодов: 128 NOTIF_MESSAGE, 130 NOTIF_MARK, 142 NOTIF_MSG_DELETE, 155 NOTIF_REACTIONS, 293 NOTIF_TRANSCRIPTION.
-  - Полный payload `MSG_SEND` (64): `cid`, `detectShare`, `notify`, `isLive` как у официального клиента.
-  - Inbound typing (op 65) на экран чата.
+- [x] **Этап 2a — Ядро мессенджинга: чаты после входа.** Детали: [docs/STAGE_02.md](docs/STAGE_02.md).
+  - Парсинг снэпшота LOGIN (op 19, `interactive=true`) → запись `chats`/`contacts`/профиля в локальную БД, наполнение главного экрана. Корневая причина пустого списка — `interactive:false` — устранена.
+  - Полный payload `MSG_SEND` (64): `cid`, `detectShare`, `notify`, `randomId` как у официального клиента.
+- [ ] **Этап 2b — Push-события и устойчивость.**
+  - Opcode-aware диспетчер push: 128 NOTIF_MESSAGE (есть), 130 NOTIF_MARK, 142 NOTIF_MSG_DELETE, 155 NOTIF_REACTIONS, 293 NOTIF_TRANSCRIPTION.
+  - Inbound typing на экран чата.
   - DNS-over-HTTPS fallback (1.1.1.1 / 8.8.8.8 по IP с сохранением SNI) — устойчивость к DNS-блокировке.
 - [ ] **Этап 3 — iOS-паритет интерфейса.** Cupertino-навигация (swipe-back, SafeArea, Dynamic Island), типографика SF Pro, доводка экранов под облик оригинального MAX.
 - [ ] **Этап 4 — Готовность iOS-сборки.** `ios/Runner` Info.plist (камера, фото, контакты, микрофон), bundle id, display name `MAX`, иконки, launch screen, заготовка APNs/push.

@@ -17,7 +17,11 @@
 
 Проверка: `flutter analyze` чисто; `flutter test` 38/38.
 
+## Opcode-aware push-события (2026-06-04)
+
+`MaxClient` раскладывает server-push по опкоду в типизированный поток `pushEvents` (`classifyPushEvent`): 130 read, 142 deleted, 155 reactions, 293 transcription. NOTIF_MESSAGE (128) по-прежнему идёт в `incomingStream`. `MessagesRepository._onEvent` мутирует БД ТОЛЬКО на явном удалении по серверному id (`deleteMessageByServerId`); read/reactions/transcription прокинуты на будущее без догадок о схеме. id сообщений для удаления берутся только из декодированной карты (не из байт-скана) — чтобы не удалить чужое. `push_event_test` — 7 кейсов.
+
 ## Осталось в этапе
 
-- Реакции (отправка), события групп/каналов (`_type=CONTROL`), поиск по чатам/сообщениям, доводка экрана настроек, zstd-распаковка кадров (`cof=0xFF`).
-- Push-опкоды 130 (read), 142 (delete), 155 (reactions), inbound typing — требуют живого pcap: эталонные клиенты (bridge.py, maxclient) их не парсят, имена полей неизвестны.
+- Реакции (отправка), события групп/каналов (`_type=CONTROL`), поиск по чатам/сообщениям, доводка экрана настроек, активные сессии (op 96), zstd-распаковка кадров (`cof=0xFF`).
+- Точные схемы payload для read/reactions/transcription-push требуют живого pcap (эталонные клиенты их не парсят): события доставляются, но в БД пишется только безопасное удаление.

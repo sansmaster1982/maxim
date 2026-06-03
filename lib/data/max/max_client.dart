@@ -57,6 +57,12 @@ class MaxClient {
   Map<String, dynamic>? _lastLoginSnapshot;
   Map<String, dynamic>? get lastLoginSnapshot => _lastLoginSnapshot;
 
+  /// Сырое (распакованное) тело ответа LOGIN. Fallback: когда compact-msgpack
+  /// чатов не декодируется, id чатов добываются байт-сканом
+  /// (RawParsers.extractChatIds), а детали — через CHAT_INFO (op 48).
+  Uint8List? _lastLoginRaw;
+  Uint8List? get lastLoginRaw => _lastLoginRaw;
+
   String get deviceId => _deviceId ?? '(unresolved)';
 
   /// Кеш разрешённого deviceId. null до первого [_resolveDeviceId].
@@ -306,7 +312,12 @@ class MaxClient {
     if (f.cmd != 1) throw MaxLoginFailed('LOGIN cmd=${f.cmd}');
     _token = token;
     final snap = _asMap(f.decoded);
-    if (interactive && snap.isNotEmpty) _lastLoginSnapshot = snap;
+    if (interactive) {
+      // raw кешируем всегда (нужен для байт-скана id), снэпшот — если декод
+      // дал непустую карту.
+      _lastLoginRaw = f.body;
+      if (snap.isNotEmpty) _lastLoginSnapshot = snap;
+    }
     return snap;
   }
 

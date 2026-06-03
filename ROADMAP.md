@@ -18,13 +18,11 @@
 - [x] **Этап 2a — Ядро мессенджинга: чаты после входа.** Детали: [docs/STAGE_02.md](docs/STAGE_02.md).
   - Парсинг снэпшота LOGIN (op 19, `interactive=true`) → запись `chats`/`contacts`/профиля в локальную БД, наполнение главного экрана. Корневая причина пустого списка — `interactive:false` — устранена.
   - Полный payload `MSG_SEND` (64): `cid`, `detectShare`, `notify`, `randomId` как у официального клиента.
-- [ ] **Этап 2b — Push-события и устойчивость.**
-  - Opcode-aware диспетчер push: 128 NOTIF_MESSAGE (есть), 130 NOTIF_MARK, 142 NOTIF_MSG_DELETE, 155 NOTIF_REACTIONS, 293 NOTIF_TRANSCRIPTION.
-  - Inbound typing на экран чата.
-  - DNS-over-HTTPS fallback (1.1.1.1 / 8.8.8.8 по IP с сохранением SNI) — устойчивость к DNS-блокировке.
+- [x] **Этап 2b — Надёжное наполнение списка чатов.** Детали: [docs/STAGE_02b.md](docs/STAGE_02b.md).
+  - Кеш сырого тела LOGIN + байт-скан id чатов (`RawParsers.extractChatIds`, порт из maxclient) + добор названий/аватаров через CHAT_INFO (op 48). Двухуровневое наполнение в `SyncRepository`: богатые объекты из декода, плюс id из raw для случаев, когда compact-msgpack не декодируется.
 - [ ] **Этап 3 — iOS-паритет интерфейса.** Cupertino-навигация (swipe-back, SafeArea, Dynamic Island), типографика SF Pro, доводка экранов под облик оригинального MAX.
 - [ ] **Этап 4 — Готовность iOS-сборки.** `ios/Runner` Info.plist (камера, фото, контакты, микрофон), bundle id, display name `MAX`, иконки, launch screen, заготовка APNs/push.
-- [ ] **Этап 5 — Расширенные функции.** Реакции (send), события групп/каналов (`_type=CONTROL`), поиск, доводка настроек, zstd-распаковка кадров (`cof=0xFF`).
+- [ ] **Этап 5 — Расширенные функции и устойчивость.** Реакции (send), события групп/каналов (`_type=CONTROL`), поиск, доводка настроек, zstd-распаковка кадров (`cof=0xFF`), DNS-over-HTTPS fallback. Push-опкоды 130/142/155 и inbound typing — требуют живого pcap: эталонные клиенты (bridge.py, maxclient) их не парсят, угадывать поля нельзя.
 - [ ] **Этап 6 — Заливка на GitHub.** `gh auth login` (действие пользователя), создание репозитория, push.
 
 ## Открытые блокеры окружения

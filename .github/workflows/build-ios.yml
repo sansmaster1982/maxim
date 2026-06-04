@@ -100,21 +100,17 @@ jobs:
           echo -n "$APP_STORE_CONNECT_API_KEY" | base64 --decode \
             > ~/.private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8
 
-      - name: Archive (unsigned)
+      - name: Archive (signed via project)
         run: |
-          # Архив БЕЗ подписи. Подпись делает exportArchive в режиме automatic:
-          # т.к. method=app-store-connect, он берёт DISTRIBUTION-профиль (через
-          # API-ключ, -allowProvisioningUpdates), а не development — значит не
-          # требует подключённого устройства. И подписывает .app + встроенные
-          # фреймворки сам, без навешивания профиля на поды/фреймворки.
+          # Подпись Runner — ручная distribution, задана в ios/Flutter/Release.xcconfig
+          # (применяется ТОЛЬКО к таргету Runner; поды используют свои xcconfig'и).
+          # Глобальные signing-флаги НЕ передаём, иначе профиль уедет на поды.
           xcodebuild archive \
             -workspace ios/Runner.xcworkspace \
             -scheme Runner \
             -sdk iphoneos \
             -configuration Release \
             -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
-            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
-            CODE_SIGNING_ALLOWED=NO \
             COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Create ExportOptions.plist
@@ -133,7 +129,14 @@ jobs:
               <key>teamID</key>
               <string>${TEAM_ID}</string>
               <key>signingStyle</key>
-              <string>automatic</string>
+              <string>manual</string>
+              <key>signingCertificate</key>
+              <string>Apple Distribution</string>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>${BUNDLE_ID}</key>
+                  <string>${PROFILE_UUID}</string>
+              </dict>
               <key>uploadSymbols</key>
               <true/>
               <key>uploadBitcode</key>

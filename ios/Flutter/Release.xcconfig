@@ -1,1 +1,10 @@
 #include "Generated.xcconfig"
+
+// Ручная distribution-подпись только для таргета Runner (поды используют свои
+// xcconfig'и и это не получают). Профиль — наш maxim_Dist (UUID), сертификат —
+// Apple Distribution. CI ставит профиль и сертификат в keychain до архива.
+CODE_SIGN_STYLE = Manual
+DEVELOPMENT_TEAM = L7NT62PCSB
+CODE_SIGN_IDENTITY = Apple Distribution
+CODE_SIGN_IDENTITY[sdk=iphoneos*] = Apple Distribution
+PROVISIONING_PROFILE_SPECIFIER = 42180dac-dd59-451d-a6cb-851123d31a09

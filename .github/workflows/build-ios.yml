@@ -100,29 +100,21 @@ jobs:
           echo -n "$APP_STORE_CONNECT_API_KEY" | base64 --decode \
             > ~/.private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8
 
-      - name: Archive (automatic cloud signing)
-        env:
-          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          TEAM_ID: ${{ secrets.TEAM_ID }}
+      - name: Archive (unsigned)
         run: |
-          # Автоматическая (cloud) подпись через App Store Connect API: xcodebuild
-          # сам создаёт managed-профиль для приложения и подписывает встроенные
-          # фреймворки сертификатом без профиля. Так не возникает ни «<Pod> does
-          # not support provisioning profiles», ни «<framework> does not support...».
+          # Архив БЕЗ подписи. Подпись делает exportArchive в режиме automatic:
+          # т.к. method=app-store-connect, он берёт DISTRIBUTION-профиль (через
+          # API-ключ, -allowProvisioningUpdates), а не development — значит не
+          # требует подключённого устройства. И подписывает .app + встроенные
+          # фреймворки сам, без навешивания профиля на поды/фреймворки.
           xcodebuild archive \
             -workspace ios/Runner.xcworkspace \
             -scheme Runner \
             -sdk iphoneos \
             -configuration Release \
             -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath ~/.private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8 \
-            -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
-            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Automatic \
+            CODE_SIGNING_ALLOWED=NO \
             COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Create ExportOptions.plist

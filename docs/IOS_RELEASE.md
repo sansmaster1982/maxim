@@ -5,9 +5,9 @@
 ## Что нужно один раз в Apple Developer
 
 1. **Apple Developer Program** (платный, $99/год) — обязателен для TestFlight/App Store. Team у тебя уже есть: `aleksandr bronnikov` (`TEAM_ID = L7NT62PCSB`).
-2. **App ID** для maxim: developer.apple.com → Identifiers → новый App ID с Bundle ID `com.maxim.ios` (значение из `env.BUNDLE_ID` в воркфлоу; поменяешь — поменяй и там).
-3. **Distribution provisioning profile** под этот App ID: Profiles → App Store → выбрать App ID `com.maxim.ios` и distribution-сертификат → скачать `.mobileprovision`.
-4. **App в App Store Connect**: My Apps → + → New App, Bundle ID `com.maxim.ios`, имя (напр. «maxim»).
+2. **App ID** для maxim: developer.apple.com → Identifiers → новый App ID с Bundle ID `com.sansmaster.maxim` (значение из `env.BUNDLE_ID` в воркфлоу; `com.sansmaster.maxim` глобально занят — bundle id уникален во всём Apple). Поменяешь bundle — поменяй и `env.BUNDLE_ID`.
+3. **Distribution provisioning profile** под этот App ID: Profiles → App Store → выбрать App ID `com.sansmaster.maxim` и distribution-сертификат → скачать `.mobileprovision`.
+4. **App в App Store Connect**: My Apps → + → New App, Bundle ID `com.sansmaster.maxim`, имя (напр. «maxim»).
 
 Сертификат (Apple Distribution) и App Store Connect API key — **те же, что для Dark Message**, заводить заново не нужно.
 
@@ -24,7 +24,7 @@
 | `APP_STORE_CONNECT_API_KEY` | `.p8` ключ в base64 | как в Dark Message |
 | `APP_STORE_CONNECT_KEY_ID` | Key ID ключа | как в Dark Message |
 | `APP_STORE_CONNECT_ISSUER_ID` | Issuer ID | как в Dark Message |
-| `BUILD_PROVISION_PROFILE_BASE64` | **НОВЫЙ** — профиль под `com.maxim.ios` в base64 | п.3 выше |
+| `BUILD_PROVISION_PROFILE_BASE64` | **НОВЫЙ** — профиль под `com.sansmaster.maxim` в base64 | п.3 выше |
 
 Base64 профиля/сертификата (на Windows PowerShell):
 ```

@@ -51,6 +51,14 @@ app.*.map.json
 *.keystore
 key.properties
 
+# iOS signing — НИКОГДА не коммитим (только в GitHub Actions secrets)
+*.p12
+*.p8
+*.mobileprovision
+*.cer
+*.certSigningRequest
+AuthKey_*.p8
+
 # Локальные базы данных
 *.db
 *.db-shm

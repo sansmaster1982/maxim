@@ -53,5 +53,7 @@
 	<string>Микрофон нужен для голосовых сообщений.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>Контакты нужны для поиска собеседников из адресной книги.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

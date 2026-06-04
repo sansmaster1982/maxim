@@ -47,3 +47,7 @@ GitHub → вкладка **Actions** → workflow «Build & Upload iOS (TestFli
 ## Токен GitHub для пуша воркфлоу
 
 Файлы в `.github/workflows/` пуш принимает только токеном со scope `workflow`. Если push воркфлоу отбился — один раз обновить scope: `gh auth refresh -s workflow` (браузерный device-flow), потом повторить push.
+
+## Итог (2026-06-04/05)
+
+Схема доведена до конца: билд `0.1.0 (2606042007)` собран на `macos-latest`, подписан новым Apple Distribution, залит в App Store Connect (run `26976490854`, 9m45s), прошёл processing и установлен на реальный iPhone через **Internal TestFlight**. Mac не использовался. Полная хроника подписи (7 прогонов, канонический фикс через `ios/Flutter/Release.xcconfig`) и нюансы Internal/External TestFlight — в `docs/STAGE_08.md`.

@@ -275,3 +275,47 @@ a81e1af init: Flutter-форк MAX-мессенджера
 
 ### Проверка
 `flutter analyze` чисто, 23 теста зелёных (+`device_profile_test` фиксирует порядок полей userAgent). Коммит `9955a18`.
+
+---
+
+## Этап 8 — Деплой на iOS через TestFlight без Mac (2026-06-04/05)
+
+Подробности: `docs/STAGE_08.md`. Кратко.
+
+### Итог
+maxim собран, подписан и установлен на реальный iPhone **без единого Mac**.
+Билд `0.1.0 (2606042007)` залит через GitHub Actions (`macos-latest`), прошёл
+Apple processing, роздан через **Internal TestFlight**, запускается на устройстве.
+
+### Что сделано
+- Воркфлоу `.github/workflows/build-ios.yml` по схеме `DarkMessage-iOS`:
+  `flutter build ios --no-codesign` → `xcodebuild archive` → `-exportArchive`
+  с `destination: upload` (App Store Connect API key).
+- **Канонический фикс подписи** (после 6 неудачных прогонов): ручная
+  distribution-подпись **только таргета Runner** через `ios/Flutter/Release.xcconfig`
+  (`Manual` / `Apple Distribution` / `PROVISIONING_PROFILE_SPECIFIER`),
+  bundle id `com.sansmaster.maxim` в `project.pbxproj`, manual `ExportOptions.plist`.
+  Глобальные signing-флаги в `xcodebuild` НЕ передаются — иначе профиль уезжает
+  на поды, которые его не принимают.
+- Новый Apple Distribution-сертификат выпущен через OpenSSL CSR (старый `.p12`
+  был на другом ПК). `.p12`/`.p8`/профиль в репо не коммитятся, пароли — только
+  в секретах GitHub.
+
+### Хроника прогонов (Actions репозитория maxim)
+| # | Run ID | Итог |
+| --- | --- | --- |
+| 1 | 26972604136 | archive: Pod не принимает profile (глобальный флаг) |
+| 2–3 | 26973097496 / 26973824519 | export exit 70: нет App-записи в ASC |
+| 4 | 26974949807 | export: framework не принимает profile |
+| 5 | 26975445379 | archive: automatic свалилась в development |
+| 6 | 26975875454 | export: API-ключ без права cloud-signing |
+| 7 | 26976490854 | **SUCCESS**, 9m45s, залито в App Store Connect |
+
+### TestFlight
+Internal (без ревью) — для себя/своих, билд виден в приложении TestFlight под
+тем Apple ID, что в Testers. External (публичная ссылка) требует Beta App Review
+и упирается в SMS-вход для ревьюера — отложено.
+
+### Открытый момент
+Приложение работает на устройстве, есть баги — фиксируются отдельным заходом,
+список в `docs/STAGE_08.md` (раздел «Итог»).

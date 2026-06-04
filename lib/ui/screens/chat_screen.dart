@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -30,6 +32,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// (догрузка). При догрузке не дёргаем _scrollToEnd.
   int? _lastBottomTs;
 
+  /// Показывать «печатает…» (push 129); сбрасывается таймером через 5с.
+  bool _typing = false;
+  Timer? _typingTimer;
+
   @override
   void initState() {
     super.initState();
@@ -38,9 +44,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   @override
   void dispose() {
+    _typingTimer?.cancel();
     _scroll.removeListener(_onScroll);
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _onTyping() {
+    _typingTimer?.cancel();
+    if (!_typing) setState(() => _typing = true);
+    _typingTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) setState(() => _typing = false);
+    });
   }
 
   void _onScroll() {
@@ -87,6 +102,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (m.id != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    for (final emoji in const ['👍', '❤️', '😂', '😮', '😢', '🔥'])
+                      InkWell(
+                        onTap: () => Navigator.pop(ctx, 'react:$emoji'),
+                        borderRadius: BorderRadius.circular(20),
+                        child: Padding(
+                          padding: const EdgeInsets.all(6),
+                          child: Text(emoji,
+                              style: const TextStyle(fontSize: 26)),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            if (m.id != null) const Divider(height: 0),
             ListTile(
               leading: const Icon(Icons.reply),
               title: const Text('Ответить'),
@@ -141,6 +176,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       );
     } else if (action == 'edit') {
       await _showEditDialog(m);
+    } else if (action != null && action.startsWith('react:')) {
+      await _toggleReaction(m, action.substring('react:'.length));
     }
   }
 
@@ -188,6 +225,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
+  /// Переключить свою реакцию на сообщении: тот же эмодзи — снять, иначе поставить.
+  Future<void> _toggleReaction(MaxMessage m, String emoji) async {
+    final id = m.id;
+    if (id == null) return;
+    final notifier = ref.read(chatHistoryProvider(widget.chatId).notifier);
+    if (m.yourReaction == emoji) {
+      await notifier.cancelReact(id);
+    } else {
+      await notifier.react(id, emoji);
+    }
+  }
+
   Future<void> _copyToClipboard(String text) async {
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
@@ -198,6 +247,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(typingProvider(widget.chatId), (_, next) {
+      next.whenData((_) => _onTyping());
+    });
     final async = ref.watch(chatHistoryProvider(widget.chatId));
     final ctrl = ref.read(chatHistoryProvider(widget.chatId).notifier);
     final loadingOlder = ctrl.isLoadingOlder;
@@ -244,7 +296,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       Text(
-                        'был(а) недавно',
+                        _typing ? 'печатает…' : 'был(а) недавно',
                         style: TextStyle(
                           fontSize: 12,
                           color: Theme.of(context)
@@ -396,6 +448,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 message: m,
                 chatId: widget.chatId,
                 messageServerId: m.id,
+                onReactionTap: (emoji) => _toggleReaction(m, emoji),
                 onRetry: m.status == MessageStatus.failed
                     ? () => ref
                         .read(chatHistoryProvider(widget.chatId).notifier)

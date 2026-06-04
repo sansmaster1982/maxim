@@ -56,4 +56,26 @@ void main() {
     final res = await db.searchMessages('тест', limit: 3);
     expect(res.length, 3);
   });
+
+  test('setMessageReactions: counts + your_reaction, roundtrip через fromDbRow',
+      () async {
+    await db.insertMessage(const MaxMessage(
+      id: 500,
+      chatId: 1,
+      text: 'hi',
+      timeMs: 1,
+      direction: MessageDirection.incoming,
+    ));
+    await db.setMessageReactions(500,
+        counts: {'👍': 3, '❤️': 1}, yourReaction: '👍');
+    final m = (await db.messages(1)).firstWhere((x) => x.id == 500);
+    expect(m.reactions, {'👍': 3, '❤️': 1});
+    expect(m.yourReaction, '👍');
+
+    // снять свою реакцию (пустая строка -> null), счётчики не трогаем
+    await db.setMessageReactions(500, yourReaction: '');
+    final m2 = (await db.messages(1)).firstWhere((x) => x.id == 500);
+    expect(m2.yourReaction, isNull);
+    expect(m2.reactions, {'👍': 3, '❤️': 1});
+  });
 }

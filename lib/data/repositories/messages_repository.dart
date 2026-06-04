@@ -708,7 +708,10 @@ class MessagesRepository {
         break;
       case MaxPushKind.read:
       case MaxPushKind.reactions:
+      case MaxPushKind.youReacted:
       case MaxPushKind.transcription:
+      case MaxPushKind.typing:
+        // Round 2: запись реакций/транскрипции в БД и индикатор «печатает».
         break;
     }
   }

@@ -42,10 +42,15 @@ class MaxOp {
   static const int sessionsInfo = 96;
   static const int sessionsClose = 97;
   static const int notifMessage = 128;
+  static const int notifTyping = 129;
   static const int notifMark = 130;
   static const int notifAttach = 136;
   static const int notifMsgDelete = 142;
   static const int notifReactions = 155;
+  static const int notifYouReacted = 156;
+  static const int msgReaction = 178;
+  static const int msgCancelReaction = 179;
+  static const int msgGetReactions = 180;
   static const int transcribeMedia = 202;
   static const int notifTranscription = 293;
 }

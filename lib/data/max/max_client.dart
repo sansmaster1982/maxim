@@ -14,6 +14,7 @@ import 'max_codec.dart';
 import 'models/incoming_message.dart';
 import 'models/push_event.dart';
 import 'raw_parsers.dart';
+import 'reactions.dart';
 
 /// Колбэк для отладки push-фреймов (как `on_push_debug` в Python-версии).
 typedef PushDebug = void Function(MaxFrame frame);
@@ -400,9 +401,9 @@ class MaxClient {
       message['attaches'] = attaches;
     }
     if (replyToId != null) {
-      // ключ reply в payload sendMessage MAX не подтверждён в декомпиле,
-      // отправляем как `replyTo` — сервер либо примет, либо проигнорирует.
-      message['replyTo'] = replyToId;
+      // Ответ в MAX — это message.link = {type:REPLY, messageId} (подтверждено
+      // vkmax + nyakokitsu/MaxProtoExplanation), не отдельный replyTo.
+      message['link'] = {'type': 'REPLY', 'messageId': replyToId};
     }
     final f = await _request(MaxOp.sendMessage, {
       'chatId': chatId,
@@ -437,6 +438,24 @@ class MaxClient {
     final f = await _request(MaxOp.editMessage, payload);
     if (f.cmd != 1) throw MaxError('editMessage cmd=${f.cmd}');
     return _asMap(f.decoded);
+  }
+
+  /// Поставить реакцию-эмодзи на сообщение (opcode 178).
+  Future<void> setReaction(int chatId, int messageId, String emoji) async {
+    final f = await _request(
+      MaxOp.msgReaction,
+      reactionSetPayload(chatId, messageId, emoji),
+    );
+    if (f.cmd != 1) throw MaxError('setReaction cmd=${f.cmd}');
+  }
+
+  /// Снять свою реакцию с сообщения (opcode 179).
+  Future<void> cancelReaction(int chatId, int messageId) async {
+    final f = await _request(
+      MaxOp.msgCancelReaction,
+      reactionCancelPayload(chatId, messageId),
+    );
+    if (f.cmd != 1) throw MaxError('cancelReaction cmd=${f.cmd}');
   }
 
   // ───────────────────────── media ────────────────────────────

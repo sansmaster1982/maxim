@@ -11,7 +11,8 @@ on:
 env:
   # Бандл maxim. Должен быть зарегистрирован как App ID в Apple Developer,
   # и под него выпущен distribution provisioning profile (см. docs/IOS_RELEASE.md).
-  BUNDLE_ID: com.maxim.ios
+  # com.maxim.ios глобально занят — используем уникальный namespace.
+  BUNDLE_ID: com.sansmaster.maxim
   FLUTTER_VERSION: "3.29.2"
 
 jobs:

@@ -31,6 +31,7 @@ class MaxClient {
     Logger? logger,
     this.deviceIdLoader,
     this.userAgentLoader,
+    this.zstdDecoder,
   }) : _log = logger ?? Logger(printer: PrettyPrinter(methodCount: 0)) {
     _reconnect = _ReconnectManager(this, _log);
   }
@@ -48,6 +49,13 @@ class MaxClient {
   /// бросает — используется минимальный проверенный набор. См. DeviceProfile.
   final Future<Map<String, Object?>> Function(String deviceType)?
       userAgentLoader;
+
+  /// Подключаемый zstd-декодер для кадров с cof=0xFF. По реверсу
+  /// (one.me.sdk.zsrd.ZstdUtil) это стандартный zstd-кадр БЕЗ словаря, так что
+  /// подойдёт любой generic zstd. null = такие кадры не распаковываются (редки;
+  /// основной трафик — LZ4). Платформенную реализацию (FFI/плагин) передаём
+  /// сюда, не трогая клиент и не навязывая нативную зависимость iOS-сборке.
+  final Uint8List Function(Uint8List input)? zstdDecoder;
 
   /// Вызывается когда сервер отверг сохранённый токен (FAIL_LOGIN_TOKEN) —
   /// UI должен разлогинить и показать экран входа, а не висеть в reconnect.
@@ -689,7 +697,18 @@ class MaxClient {
   Uint8List _decompressBody(int cof, int payloadLen, Uint8List body) {
     if (cof == 0 || body.isEmpty) return body;
     if (cof == 0xFF) {
-      _log.w('zstd-кадр (cof=0xFF) не распакован — нет нативного zstd');
+      // Стандартный zstd-кадр без словаря. Распакуем подключённым декодером,
+      // если он задан; иначе отдаём сырое и логируем.
+      final dec = zstdDecoder;
+      if (dec != null) {
+        try {
+          return dec(body);
+        } catch (e) {
+          _log.w('zstd decode failed (len=$payloadLen): $e');
+          return body;
+        }
+      }
+      _log.w('zstd-кадр (cof=0xFF): декодер не подключён, отдаю сырое');
       return body;
     }
     try {

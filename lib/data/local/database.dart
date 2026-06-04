@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
@@ -21,7 +23,7 @@ class AppDatabase {
     final path = p.join(dir.path, AppMeta.dbName);
     final db = await openDatabase(
       path,
-      version: 6,
+      version: 7,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -33,7 +35,7 @@ class AppDatabase {
   static AppDatabase forDb(Database db) => AppDatabase._(db);
 
   /// Только для тестов: создать схему версии 6 в переданной БД.
-  static Future<void> createSchemaForTest(Database db) => _onCreate(db, 6);
+  static Future<void> createSchemaForTest(Database db) => _onCreate(db, 7);
 
   static Future<void> _onUpgrade(
     Database db,
@@ -80,6 +82,10 @@ class AppDatabase {
       await db.execute(
         'ALTER TABLE chats ADD COLUMN is_muted INTEGER NOT NULL DEFAULT 0',
       );
+    }
+    if (oldVersion < 7) {
+      await db.execute('ALTER TABLE messages ADD COLUMN reactions TEXT');
+      await db.execute('ALTER TABLE messages ADD COLUMN your_reaction TEXT');
     }
   }
 
@@ -151,7 +157,9 @@ class AppDatabase {
         status TEXT NOT NULL DEFAULT 'sent',
         reply_to_id INTEGER,
         reply_to_preview TEXT,
-        edited_at INTEGER
+        edited_at INTEGER,
+        reactions TEXT,
+        your_reaction TEXT
       )
     ''');
     await db.execute('''
@@ -412,6 +420,34 @@ class AppDatabase {
   /// Возвращает число удалённых строк (0 если такого сообщения локально нет).
   Future<int> deleteMessageByServerId(int serverId) async {
     return _db.delete('messages', where: 'id = ?', whereArgs: [serverId]);
+  }
+
+  /// Обновить реакции сообщения (push 155/156 или своя отправка). counts —
+  /// JSON {emoji:count}; yourReaction — своя реакция (пустая строка = снять).
+  Future<void> setMessageReactions(
+    int serverId, {
+    Map<String, int>? counts,
+    String? yourReaction,
+  }) async {
+    final values = <String, Object?>{};
+    if (counts != null) {
+      values['reactions'] = counts.isEmpty ? null : jsonEncode(counts);
+    }
+    if (yourReaction != null) {
+      values['your_reaction'] = yourReaction.isEmpty ? null : yourReaction;
+    }
+    if (values.isEmpty) return;
+    await _db.update('messages', values, where: 'id = ?', whereArgs: [serverId]);
+  }
+
+  /// Сохранить транскрипцию (push 293) для attach по серверному fileId/mediaId.
+  Future<void> setAttachTranscriptionByFileId(int fileId, String text) async {
+    await _db.update(
+      'attachments',
+      {'transcription': text},
+      where: 'file_id = ?',
+      whereArgs: [fileId],
+    );
   }
 
   // ──────────────────────── contacts ───────────────────────

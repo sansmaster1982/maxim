@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:equatable/equatable.dart';
 
 import 'attach.dart';
@@ -32,6 +34,12 @@ class MaxMessage extends Equatable {
   /// Метка времени последней правки (opcode 67). null = сообщение не редактировалось.
   final int? editedAtMs;
 
+  /// Реакции на сообщение: {эмодзи: количество}. Приходят push 155/156.
+  final Map<String, int> reactions;
+
+  /// Собственная реакция текущего пользователя (эмодзи) или null.
+  final String? yourReaction;
+
   const MaxMessage({
     required this.chatId,
     required this.text,
@@ -45,6 +53,8 @@ class MaxMessage extends Equatable {
     this.replyToPreview,
     this.attaches = const [],
     this.editedAtMs,
+    this.reactions = const {},
+    this.yourReaction,
   });
 
   MaxMessage copyWith({
@@ -56,6 +66,8 @@ class MaxMessage extends Equatable {
     String? replyToPreview,
     List<MaxAttach>? attaches,
     int? editedAtMs,
+    Map<String, int>? reactions,
+    String? yourReaction,
   }) {
     return MaxMessage(
       id: id ?? this.id,
@@ -70,10 +82,13 @@ class MaxMessage extends Equatable {
       replyToPreview: replyToPreview ?? this.replyToPreview,
       attaches: attaches ?? this.attaches,
       editedAtMs: editedAtMs ?? this.editedAtMs,
+      reactions: reactions ?? this.reactions,
+      yourReaction: yourReaction ?? this.yourReaction,
     );
   }
 
   bool get hasAttaches => attaches.isNotEmpty;
+  bool get hasReactions => reactions.isNotEmpty;
 
   Map<String, Object?> toMap() => {
     'id': id,
@@ -87,6 +102,8 @@ class MaxMessage extends Equatable {
     'reply_to_id': replyToId,
     'reply_to_preview': replyToPreview,
     'edited_at': editedAtMs,
+    'reactions': reactions.isEmpty ? null : jsonEncode(reactions),
+    'your_reaction': yourReaction,
   };
 
   factory MaxMessage.fromDbRow(Map<String, Object?> r) => MaxMessage(
@@ -107,7 +124,20 @@ class MaxMessage extends Equatable {
     replyToId: r['reply_to_id'] as int?,
     replyToPreview: r['reply_to_preview'] as String?,
     editedAtMs: (r['edited_at'] as num?)?.toInt(),
+    reactions: _decodeReactions(r['reactions'] as String?),
+    yourReaction: r['your_reaction'] as String?,
   );
+
+  static Map<String, int> _decodeReactions(String? s) {
+    if (s == null || s.isEmpty) return const {};
+    try {
+      final m = jsonDecode(s);
+      if (m is Map) {
+        return m.map((k, v) => MapEntry(k.toString(), (v as num).toInt()));
+      }
+    } catch (_) {}
+    return const {};
+  }
 
   @override
   List<Object?> get props => [
@@ -123,5 +153,7 @@ class MaxMessage extends Equatable {
     replyToPreview,
     attaches,
     editedAtMs,
+    reactions,
+    yourReaction,
   ];
 }

@@ -51,6 +51,11 @@ class MessagesRepository {
   /// Поток id чатов, в которых что-то изменилось.
   Stream<int> get changedChats => _onChat.stream;
 
+  final _typingCtrl = StreamController<MaxPushEvent>.broadcast();
+
+  /// Поток событий «печатает» (push 129). UI чата фильтрует по chatId.
+  Stream<MaxPushEvent> get typingEvents => _typingCtrl.stream;
+
   Future<void> start() async {
     _pushSub ??= client.incomingStream.listen(_onPush, onError: (e) {
       _log.w('push stream error: $e');
@@ -691,6 +696,21 @@ class MessagesRepository {
     }
   }
 
+  /// Поставить реакцию-эмодзи (op 178). Оптимистично помечаем свою реакцию;
+  /// точные счётчики придут push'ом 155/156.
+  Future<void> react(int chatId, int messageId, String emoji) async {
+    await client.setReaction(chatId, messageId, emoji);
+    await db.setMessageReactions(messageId, yourReaction: emoji);
+    _onChat.add(chatId);
+  }
+
+  /// Снять свою реакцию (op 179).
+  Future<void> cancelReact(int chatId, int messageId) async {
+    await client.cancelReaction(chatId, messageId);
+    await db.setMessageReactions(messageId, yourReaction: '');
+    _onChat.add(chatId);
+  }
+
   /// Обработка типизированных push-событий (op 130/142/155/293). БД мутируем
   /// только на явном удалении по серверному id; read/reactions/transcription
   /// прокинуты на будущее (схемы payload не подтверждены — без догадок).
@@ -706,12 +726,36 @@ class MessagesRepository {
         }
         if (changed) _onChat.add(chatId);
         break;
-      case MaxPushKind.read:
       case MaxPushKind.reactions:
+        final mid = ev.messageId;
+        if (mid != null) {
+          await db.setMessageReactions(mid, counts: ev.reactionCounts);
+          _onChat.add(chatId);
+        }
+        break;
       case MaxPushKind.youReacted:
+        final mid = ev.messageId;
+        if (mid != null) {
+          await db.setMessageReactions(
+            mid,
+            counts: ev.reactionCounts,
+            yourReaction: ev.yourReaction ?? '',
+          );
+          _onChat.add(chatId);
+        }
+        break;
       case MaxPushKind.transcription:
+        final media = ev.mediaId;
+        final text = ev.transcription;
+        if (media != null && text != null && text.isNotEmpty) {
+          await db.setAttachTranscriptionByFileId(media, text);
+          _onChat.add(chatId);
+        }
+        break;
       case MaxPushKind.typing:
-        // Round 2: запись реакций/транскрипции в БД и индикатор «печатает».
+        if (!_typingCtrl.isClosed) _typingCtrl.add(ev);
+        break;
+      case MaxPushKind.read:
         break;
     }
   }

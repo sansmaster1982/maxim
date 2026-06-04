@@ -39,9 +39,13 @@
 - Reply через `message.link`.
 - Тесты: `reactions_test` (4), переписан `push_event_test` (9). Всего 66, analyze чисто.
 
-## Round 2 (план)
+## Round 2 (сделано)
 
-БД-схема v7 (реакции на сообщении), `MessagesRepository._onEvent`: запись реакций (155/156) и транскрипции (293) в БД, удаление по `messageIds` (142, уже есть), поток «печатает» (129) в UI чата. UI: long-press → реакция, чипы реакций под пузырём, индикатор typing в AppBar.
+- БД-схема v7: `messages.reactions` (JSON {emoji:count}) + `messages.your_reaction`. Миграция ALTER, поля `MaxMessage.reactions/yourReaction`.
+- `MessagesRepository._onEvent`: 155 → `setMessageReactions(counts)`; 156 → `setMessageReactions(counts, yourReaction)`; 293 → `setAttachTranscriptionByFileId(mediaId, text)`; 142 → удаление по `messageIds`; 129 → поток `typingEvents`.
+- Отправка: `react`/`cancelReact` (оптимистично помечают свою реакцию, точные счётчики приходят push'ом), `ChatHistoryController.react/cancelReact`, `typingProvider` (StreamProvider.family).
+- UI: long-press → ряд эмодзи (👍❤️😂😮😢🔥) ставит/снимает; чипы реакций под пузырём (своя подсвечена, тап переключает); индикатор «печатает…» в AppBar (сброс через 5с).
+- Тест: roundtrip реакций через in-memory БД (`database_search_test`). Всего 67, analyze чисто.
 
 ## Round 3 (план)
 

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/max/models/attach.dart';
 import '../data/max/models/chat.dart';
 import '../data/max/models/message.dart';
+import '../data/max/models/push_event.dart';
 import '../data/max/models/upload_input.dart';
 import 'providers.dart';
 
@@ -201,9 +202,30 @@ class ChatHistoryController extends FamilyAsyncNotifier<List<MaxMessage>, int> {
       messageId: messageServerId,
     );
   }
+
+  /// Поставить реакцию-эмодзи на сообщение (op 178).
+  Future<void> react(int messageId, String emoji) async {
+    final repo = await ref.read(messagesRepositoryProvider.future);
+    await repo.react(_chatId, messageId, emoji);
+    await _reload();
+  }
+
+  /// Снять свою реакцию (op 179).
+  Future<void> cancelReact(int messageId) async {
+    final repo = await ref.read(messagesRepositoryProvider.future);
+    await repo.cancelReact(_chatId, messageId);
+    await _reload();
+  }
 }
 
 final chatHistoryProvider = AsyncNotifierProvider.family<
     ChatHistoryController, List<MaxMessage>, int>(
   ChatHistoryController.new,
 );
+
+/// Поток событий «печатает» для конкретного чата (push 129).
+final typingProvider =
+    StreamProvider.family<MaxPushEvent, int>((ref, chatId) async* {
+  final repo = await ref.watch(messagesRepositoryProvider.future);
+  yield* repo.typingEvents.where((e) => e.chatId == chatId);
+});

@@ -1,3 +1,4 @@
+import 'contact_name.dart';
 import 'models/chat.dart';
 import 'models/contact.dart';
 
@@ -35,7 +36,7 @@ LoginSnapshot parseLoginSnapshot(Object? decoded) {
   if (profile is Map) {
     final pm = profile.map((k, v) => MapEntry(k.toString(), v));
     profileId = _toInt(pm['id'] ?? pm['userId'] ?? pm['contactId']);
-    profileName = _str(pm['name'] ?? pm['firstName']);
+    profileName = displayContactName(pm) ?? _str(pm['firstName']);
   }
 
   final chats = _parseChats(
@@ -79,7 +80,8 @@ List<MaxChat> _parseChats(List<Map<String, Object?>> arr, int? selfId) {
         type.contains('group') ||
         members > 2;
 
-    final title = _str(c['title']) ?? _str(c['name']) ?? _peerName(c, selfId);
+    final title =
+        _str(c['title']) ?? displayContactName(c) ?? _peerName(c, selfId);
     final avatar = _str(
       c['baseIconUrl'] ?? c['iconUrl'] ?? c['avatar'] ?? c['photo'] ??
           c['baseRawIconUrl'],
@@ -105,7 +107,7 @@ List<MaxContact> _parseContacts(List<Map<String, Object?>> arr) {
   for (final c in arr) {
     final id = _toInt(c['id'] ?? c['contactId'] ?? c['userId']);
     if (id == null) continue;
-    final name = _str(c['name'] ?? c['firstName']);
+    final name = displayContactName(c) ?? _str(c['firstName']);
     final phone = _str(c['phone']);
     final avatar =
         _str(c['baseRawUrl'] ?? c['photo'] ?? c['avatar'] ?? c['baseIconUrl']);
@@ -134,7 +136,7 @@ String? _peerName(Map<String, Object?> chat, int? selfId) {
     for (final p in people) {
       final pid = _toInt(p['id'] ?? p['userId'] ?? p['contactId']);
       if (selfId != null && pid == selfId) continue;
-      final nm = _str(p['name'] ?? p['firstName']);
+      final nm = displayContactName(p) ?? _str(p['firstName']);
       if (nm != null) return nm;
     }
   }

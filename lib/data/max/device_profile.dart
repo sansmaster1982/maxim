@@ -27,9 +27,15 @@ class DeviceProfile {
       return minimal(deviceType);
     }
 
-    var arch = 'arm64-v8a';
-    var osVersion = '34';
-    var deviceName = 'Android';
+    // По умолчанию — согласованный пресет реального Android-устройства
+    // (модель/SDK/arch/экран из одного телефона). Нужен на iOS/desktop/CLI,
+    // где Android-канала нет: раньше там userAgent отдавал deviceName="Android"
+    // + чужое разрешение экрана (на iPhone — iOS-овское), чего у живых
+    // Android-телефонов не бывает. Это дешёвый бан-сигнал, пресет его убирает.
+    var arch = _fbArch;
+    var osVersion = _fbSdk;
+    var deviceName = _fbName;
+    var screen = _fbScreen;
     try {
       final info = await DeviceInfoPlugin().androidInfo;
       if (info.supportedAbis.isNotEmpty) {
@@ -40,18 +46,17 @@ class DeviceProfile {
       final model = info.model.trim();
       final name = man.isEmpty ? model : '$man $model';
       if (name.trim().isNotEmpty) deviceName = name.trim();
-    } catch (_) {
-      // Нет нативного канала (desktop/CLI/тест) — остаются дефолты.
-    }
 
-    var screen = '1080x2340';
-    try {
-      final view = ui.PlatformDispatcher.instance.implicitView;
-      final size = view?.physicalSize;
+      // Реальный экран берём только на настоящем Android — там модель и
+      // разрешение из одного устройства. На пресет-пути (iOS) экран уже
+      // согласован с моделью, чужое разрешение туда тащить нельзя.
+      final size = ui.PlatformDispatcher.instance.implicitView?.physicalSize;
       if (size != null && size.width > 0 && size.height > 0) {
         screen = '${size.width.round()}x${size.height.round()}';
       }
-    } catch (_) {}
+    } catch (_) {
+      // Нет нативного Android-канала — остаётся согласованный пресет.
+    }
 
     // Порядок строго как у официального клиента (pushDeviceType — 2-й).
     return {
@@ -68,6 +73,15 @@ class DeviceProfile {
       'timezone': _ianaTimezone(),
     };
   }
+
+  // Согласованный пресет: Samsung Galaxy A54 5G (SM-A546E), Android 14.
+  // Недорогой и массовый в РФ телефон — userAgent сливается с толпой реальных
+  // устройств, а не торчит дефолтной заглушкой "Android"/sdk34. Все 4 поля из
+  // одного устройства, поэтому модель и разрешение не противоречат друг другу.
+  static const _fbName = 'samsung SM-A546E';
+  static const _fbSdk = '34';
+  static const _fbArch = 'arm64-v8a';
+  static const _fbScreen = '1080x2340';
 
   /// Проверенный рабочим python-клиентом минимум — для WEB и fallback.
   static Map<String, Object?> minimal(String deviceType) => {

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -105,6 +106,12 @@ class MaxClient {
   SecureSocket? _socket;
   StreamSubscription<Uint8List>? _sub;
   int _seq = 0;
+
+  /// Keepalive-таймер: шлёт PING (opcode 1) раз в [_pingInterval], пока сокет
+  /// жив. Держит соединение, чтобы сервер не рвал его по idle и не запускался
+  /// шторм reconnect+login (главная причина банов номера, см. MaxOp.ping).
+  Timer? _pingTimer;
+  static const Duration _pingInterval = Duration(seconds: 25);
   bool _closed = false;
   final _pending = <int, Completer<MaxFrame>>{};
   final _pushCtrl = StreamController<IncomingMessage>.broadcast();
@@ -151,6 +158,7 @@ class MaxClient {
         cancelOnError: false,
       );
       await _initSession();
+      _startKeepalive();
       _emitState(MaxConnectionState.connected);
     } catch (e) {
       // INIT упал или сокет порвался — приведём состояние к чистому
@@ -234,6 +242,7 @@ class MaxClient {
 
   /// Закрытие сокета без флага «навсегда» — для авто-переподключения.
   Future<void> _disconnect() async {
+    _stopKeepalive();
     await _sub?.cancel();
     _sub = null;
     try {
@@ -260,6 +269,31 @@ class MaxClient {
     });
     if (f.cmd != 1) {
       throw MaxError('INIT failed cmd=${f.cmd}');
+    }
+  }
+
+  /// Запустить keepalive: периодический PING (opcode 1) держит соединение,
+  /// чтобы сервер не дропал его по idle. Это убирает шторм reconnect+login,
+  /// который антифрод MAX считает автоматизацией и банит номер.
+  void _startKeepalive() {
+    _pingTimer?.cancel();
+    _pingTimer = Timer.periodic(_pingInterval, (_) => _sendPing());
+  }
+
+  void _stopKeepalive() {
+    _pingTimer?.cancel();
+    _pingTimer = null;
+  }
+
+  /// Один PING. Best-effort: важны сами исходящие байты (сервер не считает
+  /// соединение простаивающим). Таймаут короткий — если PING не прошёл, сокет
+  /// уже мёртв и сработает обычный путь onDone → reconnect.
+  Future<void> _sendPing() async {
+    if (_socket == null) return;
+    try {
+      await _request(MaxOp.ping, const {}, timeout: const Duration(seconds: 10));
+    } catch (_) {
+      // Соединение мертво — обработается обычным reconnect-путём.
     }
   }
 
@@ -1013,13 +1047,16 @@ class _ReconnectManager {
   final MaxClient _client;
   final Logger _log;
 
-  static const _baseDelay = Duration(seconds: 2);
+  // База 5с (не 2с): с рабочим keepalive соединение почти не рвётся, а если
+  // рвётся — не частим. cap 60с.
+  static const _baseDelay = Duration(seconds: 5);
   static const _maxDelay = Duration(seconds: 60);
 
   Duration _delay = _baseDelay;
   bool _running = false;
   bool _cancelled = false;
   Timer? _timer;
+  final _rng = Random();
 
   /// Запускает цикл переподключения, если он ещё не запущен.
   void start() {
@@ -1040,8 +1077,11 @@ class _ReconnectManager {
 
   void _schedule() {
     _timer?.cancel();
-    _log.i('reconnect scheduled in ${_delay.inSeconds}s');
-    _timer = Timer(_delay, _attempt);
+    // Джиттер 0–1500мс: реконнекты не выстраиваются в ровный «роботический»
+    // интервал и не бьют сервер залпом.
+    final wait = _delay + Duration(milliseconds: _rng.nextInt(1500));
+    _log.i('reconnect scheduled in ${wait.inMilliseconds}ms');
+    _timer = Timer(wait, _attempt);
   }
 
   Future<void> _attempt() async {

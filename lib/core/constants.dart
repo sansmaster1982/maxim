@@ -19,6 +19,12 @@ class MaxProto {
 /// Источник: реверс протокола в telega-to-max/max_client.py + декомпил APK
 /// (см. docs/MEDIA_OPCODES.md).
 class MaxOp {
+  /// Keepalive. Официальный клиент шлёт PING (opcode 1) периодически, чтобы
+  /// сервер не рвал простаивающее соединение. Без него сокет дропается по
+  /// idle, авто-reconnect делает новый INIT+LOGIN каждые ~30с, и антифрод MAX
+  /// видит шторм сессий на одном номере → бан. Источник: декомпил APK,
+  /// defpackage/ewc.java — `new ewc("PING", 0, 1, ...)`.
+  static const int ping = 1;
   static const int init = 6;
   static const int profile = 16;
   static const int authRequest = 17;

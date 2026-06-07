@@ -10,8 +10,10 @@ import 'package:uuid/uuid.dart';
 import '../../core/errors.dart';
 import '../local/database.dart';
 import '../local/secure_storage.dart';
+import '../max/contact_name.dart';
 import '../max/max_client.dart';
 import '../max/models/attach.dart';
+import '../max/models/chat.dart';
 import '../max/models/incoming_message.dart';
 import '../max/models/message.dart';
 import '../max/models/upload_input.dart';
@@ -64,7 +66,7 @@ class MessagesRepository {
     // Восстановление входящих медиа из синка чатов (op 19): если живой push
     // (op 128) был пропущен на обрыве, lastMessage с вложением долетит здесь.
     _syncSub ??= client.syncedChatsStream.listen(
-      (chats) => unawaited(_ingestSyncedChats(chats)),
+      (chats) => unawaited(_onSyncedChats(chats)),
       onError: (e) => _log.w('synced chats stream error: $e'),
     );
     // Если на момент start транспорт уже connected — дренаж тоже отложенный.
@@ -850,6 +852,131 @@ class MessagesRepository {
   /// ещё нет локально. Это страховка приёма медиа: op 49 (история) вложения не
   /// отдаёт, а живой op 128 теряется на обрыве — а тут lastMessage с фото
   /// долетает на каждом reconnect. Дедуп — по серверному id сообщения.
+  /// Обработка синк-чатов (op19): сперва строим строки списка чатов, потом
+  /// восстанавливаем входящие медиа из lastMessage.
+  Future<void> _onSyncedChats(List<dynamic> chats) async {
+    try {
+      await _ingestChatList(chats);
+    } catch (e) {
+      _log.w('ingestChatList failed: $e');
+    }
+    await _ingestSyncedChats(chats);
+  }
+
+  /// Строит/обновляет строки чатов из ответа op19 chats[]: serverChatId=id,
+  /// peerUserId (для диалога — участник, который не я), isGroup по типу,
+  /// превью/время. Затем одним op32 CONTACT_INFO резолвит имена собеседников в
+  /// title — сервер в логине имена не отдаёт (contacts:[]). Без этого диалоги
+  /// называются «Чат N», а отправка/история не маршрутизируются (нет
+  /// serverChatId/собеседника).
+  Future<void> _ingestChatList(List<dynamic> chats) async {
+    final myId = await storage.readMyUserId();
+    await _wipeOnAccountChange(myId);
+    final dialogPeers = <int, int>{}; // chatId -> peerUserId (только без имени)
+    var count = 0;
+    for (final raw in chats) {
+      if (raw is! Map) continue;
+      final cm = raw.map((k, v) => MapEntry(k.toString(), v));
+      final id = (cm['id'] as num?)?.toInt();
+      if (id == null || id == 0) continue;
+      final type = (cm['type'] ?? cm['chatType'])?.toString().toUpperCase();
+      final isGroup = type != null && type != 'DIALOG';
+      int? peer;
+      if (!isGroup) {
+        final parts = cm['participants'];
+        if (parts is Map) {
+          for (final k in parts.keys) {
+            final uid = int.tryParse(k.toString());
+            if (uid != null && uid != myId) {
+              peer = uid;
+              break;
+            }
+          }
+        }
+      }
+      String? preview;
+      int? time;
+      final lm = cm['lastMessage'];
+      if (lm is Map) {
+        final lmm = lm.map((k, v) => MapEntry(k.toString(), v));
+        final t = lmm['text']?.toString();
+        if (t != null && t.isNotEmpty) preview = t;
+        time = (lmm['time'] as num?)?.toInt();
+      }
+      time ??= (cm['lastEventTime'] as num?)?.toInt();
+      final existing = await db.chat(id);
+      var row = (existing ?? MaxChat(id: id)).copyWith(
+        serverChatId: id,
+        isGroup: isGroup,
+        peerUserId: peer,
+        lastMessagePreview: preview,
+        lastMessageTimeMs: time,
+      );
+      final gtitle = cm['title']?.toString();
+      if (isGroup && gtitle != null && gtitle.isNotEmpty) {
+        row = row.copyWith(title: gtitle);
+      }
+      await db.upsertChat(row);
+      count++;
+      // Имя диалога ещё не резолвлено → в очередь на op32.
+      final noName = row.title == null ||
+          row.title!.isEmpty ||
+          row.title == 'Чат ${row.id}';
+      if (peer != null && noName) dialogPeers[id] = peer;
+    }
+    _log.i('DIAG ingestChatList: $count чатов, к резолву имён '
+        '${dialogPeers.length}');
+    if (dialogPeers.isNotEmpty) await _resolvePeerNames(dialogPeers);
+    _onChat.add(0); // сигнал «список чатов обновился» → перечитать listLocal
+  }
+
+  /// Один op32 CONTACT_INFO на всех собеседников диалогов без имени → title.
+  Future<void> _resolvePeerNames(Map<int, int> dialogPeers) async {
+    final peerIds = dialogPeers.values.toSet().toList();
+    try {
+      final info = await client.contactInfo(peerIds);
+      final names = <int, String>{};
+      final arr = info['contacts'] ?? info['items'] ?? info['contactList'];
+      if (arr is List) {
+        for (final e in arr) {
+          if (e is! Map) continue;
+          final mm = e.map((k, v) => MapEntry(k.toString(), v));
+          final uid = (mm['id'] as num?)?.toInt();
+          final name = displayContactName(mm);
+          if (uid != null && name != null && name.isNotEmpty) {
+            names[uid] = name;
+          }
+        }
+      }
+      var changed = false;
+      for (final entry in dialogPeers.entries) {
+        final name = names[entry.value];
+        if (name == null) continue;
+        final c = await db.chat(entry.key);
+        if (c == null) continue;
+        await db.upsertChat(c.copyWith(title: name));
+        changed = true;
+      }
+      _log.i('DIAG resolvePeerNames: запрошено ${peerIds.length}, имён '
+          '${names.length}');
+      if (changed) _onChat.add(0);
+    } catch (e) {
+      _log.w('resolvePeerNames (op32) failed: $e');
+    }
+  }
+
+  /// Чистит локальную базу при смене аккаунта (новый myUserId ≠ прежний),
+  /// иначе чаты прошлых входов копятся (чужие/старые чаты в списке).
+  Future<void> _wipeOnAccountChange(int? myId) async {
+    if (myId == null) return;
+    final last = await storage.readLastSyncedAccountId();
+    if (last != null && last != myId) {
+      _log.i('DIAG account changed ($last -> $myId) — wiping local DB');
+      await db.wipe();
+    }
+    if (last != myId) await storage.writeLastSyncedAccountId(myId);
+  }
+
   Future<void> _ingestSyncedChats(List<dynamic> chats) async {
     final myId = await storage.readMyUserId();
     for (final raw in chats) {

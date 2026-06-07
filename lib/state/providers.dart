@@ -13,8 +13,22 @@ import '../data/repositories/messages_repository.dart';
 import '../data/repositories/sync_repository.dart';
 import '../data/repositories/upload_repository.dart';
 
+/// Диагностика на устройстве: при true логи идут И в release-сборке (видны в
+/// idevicesyslog на подключённом iPhone — нужно, чтобы разбирать reconnect/
+/// keepalive/ошибки без Mac). По умолчанию logger-пакет (DevelopmentFilter)
+/// в release молчит. SimplePrinter — однострочный, грепится в syslog
+/// (ищи reconnect|keepalive|LOGIN|rejected). Для прод-релиза в App Store
+/// выставить false.
+const bool kDeviceDiagnostics = true;
+
 final loggerProvider = Provider<Logger>((ref) {
-  return Logger(printer: PrettyPrinter(methodCount: 0));
+  return Logger(
+    filter: kDeviceDiagnostics ? ProductionFilter() : DevelopmentFilter(),
+    level: Level.debug,
+    printer: kDeviceDiagnostics
+        ? SimplePrinter(colors: false, printTime: true)
+        : PrettyPrinter(methodCount: 0),
+  );
 });
 
 final secureStorageProvider = Provider<SecureStorage>((ref) {

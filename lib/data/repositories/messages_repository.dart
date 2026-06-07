@@ -910,6 +910,29 @@ class MessagesRepository {
         time = (lmm['time'] as num?)?.toInt();
       }
       time ??= (cm['lastEventTime'] as num?)?.toInt();
+      // Дедуп диалога: если этот же диалог уже открыт из контакта (строка под
+      // id = peerUserId), не плодим вторую строку от синка (под серверным
+      // chatId). Сливаем в строку контакта, переносим сообщения, синк-дубль
+      // удаляем. Маршрут/история продолжают работать: serverChatId проставлен.
+      if (peer != null && peer != id) {
+        final contactRow = await db.chat(peer);
+        if (contactRow != null) {
+          await db.upsertChat(contactRow.copyWith(
+            serverChatId: id,
+            peerUserId: peer,
+            isGroup: false,
+            lastMessagePreview: preview,
+            lastMessageTimeMs: time,
+          ));
+          if (await db.chat(id) != null) {
+            await db.reassignMessages(id, peer);
+            await db.deleteChat(id);
+          }
+          dialogPeers[peer] = peer;
+          count++;
+          continue;
+        }
+      }
       final existing = await db.chat(id);
       var row = (existing ?? MaxChat(id: id)).copyWith(
         serverChatId: id,

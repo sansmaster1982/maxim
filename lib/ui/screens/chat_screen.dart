@@ -26,10 +26,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// Сообщение, на которое сейчас отвечаем. null = обычный режим.
   MaxMessage? _replyTo;
 
-  /// Чтобы понимать, прирос ли список с «низа» (новое сообщение) или с «верха»
-  /// (догрузка). При догрузке не дёргаем _scrollToEnd.
-  int? _lastBottomTs;
-
   @override
   void initState() {
     super.initState();
@@ -45,8 +41,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   void _onScroll() {
     if (!_scroll.hasClients) return;
-    // Близко к самому верху (где сидят самые старые) — догружаем.
-    if (_scroll.position.pixels <= 80) {
+    // reverse:true → самые старые сообщения вверху, у maxScrollExtent.
+    final pos = _scroll.position;
+    if (pos.pixels >= pos.maxScrollExtent - 80) {
       final ctrl = ref.read(chatHistoryProvider(widget.chatId).notifier);
       if (!ctrl.isLoadingOlder) {
         ctrl.loadOlder();
@@ -55,27 +52,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   void _scrollToEnd() {
+    // reverse:true → низ (последнее сообщение) = смещение 0.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
         _scroll.animateTo(
-          _scroll.position.maxScrollExtent,
+          0,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
       }
     });
-  }
-
-  void _maybeScrollToEnd(List<MaxMessage> msgs) {
-    if (msgs.isEmpty) {
-      _lastBottomTs = null;
-      return;
-    }
-    final last = msgs.last.timeMs;
-    if (_lastBottomTs == null || last > _lastBottomTs!) {
-      _lastBottomTs = last;
-      _scrollToEnd();
-    }
   }
 
   Future<void> _onMessageLongPress(MaxMessage m) async {
@@ -309,7 +295,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           Expanded(
             child: async.when(
               data: (msgs) {
-                _maybeScrollToEnd(msgs);
                 if (msgs.isEmpty) {
                   return const Center(
                     child: Text('Сообщений пока нет'),
@@ -353,23 +338,28 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   Widget _buildList(List<MaxMessage> msgs, bool loadingOlder) {
-    // Собираем плоский список item'ов: спиннер сверху + (date-divider + bubble)*.
-    final items = <_ListItem>[];
-    if (loadingOlder) {
-      items.add(const _ListItem.spinner());
-    }
+    // Item'ы в прямом порядке (старые→новые) с date-дивайдерами, затем
+    // разворачиваем и рисуем reverse:true — список открывается ВНИЗУ (на
+    // последнем сообщении) без ручного скролла и корректно на длинной истории.
+    final forward = <_ListItem>[];
     DateTime? prevDay;
     for (final m in msgs) {
       final t = DateTime.fromMillisecondsSinceEpoch(m.timeMs);
       final day = DateTime(t.year, t.month, t.day);
       if (prevDay == null || day != prevDay) {
-        items.add(_ListItem.divider(day));
+        forward.add(_ListItem.divider(day));
         prevDay = day;
       }
-      items.add(_ListItem.message(m));
+      forward.add(_ListItem.message(m));
+    }
+    final items = forward.reversed.toList();
+    // Спиннер догрузки старых — вверху (в reverse это наибольший индекс).
+    if (loadingOlder) {
+      items.add(const _ListItem.spinner());
     }
     return ListView.builder(
       controller: _scroll,
+      reverse: true,
       padding: const EdgeInsets.symmetric(vertical: 8),
       itemCount: items.length,
       itemBuilder: (_, i) {

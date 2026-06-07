@@ -687,6 +687,25 @@ class MaxClient {
     return _asMap(f.decoded);
   }
 
+  /// Сменить имя своего профиля (видно другим). Поля payload — как у
+  /// официального клиента (декомпил defpackage/r2e.java: Tasks.Profile
+  /// {requestId, firstName, lastName?, ...}). Опкод PROFILE (16) — тот же, что
+  /// на чтение. Возвращает обновлённый профиль (для проверки).
+  Future<Map<String, dynamic>> updateProfileName(
+    String firstName, {
+    String? lastName,
+  }) async {
+    final payload = <String, Object?>{
+      'requestId': DateTime.now().millisecondsSinceEpoch,
+      'firstName': firstName.trim(),
+    };
+    final ln = lastName?.trim() ?? '';
+    if (ln.isNotEmpty) payload['lastName'] = ln;
+    final f = await _request(MaxOp.profile, payload);
+    if (f.cmd != 1) throw MaxError('updateProfile cmd=${f.cmd}');
+    return _asMap(f.decoded);
+  }
+
   Future<Map<String, dynamic>> chatInfo(List<int> ids) async {
     final f = await _request(MaxOp.chatInfo, {'chatIds': ids});
     if (f.cmd != 1) throw MaxError('chatInfo cmd=${f.cmd}');

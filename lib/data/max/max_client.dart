@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -17,6 +16,7 @@ import 'models/incoming_message.dart';
 import 'models/push_event.dart';
 import 'raw_parsers.dart';
 import 'reactions.dart';
+import 'reconnect_policy.dart';
 
 /// Колбэк для отладки push-фреймов (как `on_push_debug` в Python-версии).
 typedef PushDebug = void Function(MaxFrame frame);
@@ -66,6 +66,14 @@ class MaxClient {
 
   String? _token;
 
+  /// Часы с последнего успешного LOGIN — для anti-storm throttle
+  /// (ReconnectPolicy.authThrottle). НЕ сбрасывается при дисконнекте: считаем
+  /// время с последней АВТОРИЗАЦИИ, а не с разрыва. До первого LOGIN не
+  /// запущен → sinceLastLogin = «давно» → первый вход не троттлится.
+  final Stopwatch _sinceLogin = Stopwatch();
+  Duration get sinceLastLogin =>
+      _sinceLogin.isRunning ? _sinceLogin.elapsed : const Duration(days: 3650);
+
   /// Снэпшот последнего успешного LOGIN (interactive=true): профиль, чаты,
   /// контакты. Читается SyncRepository для наполнения локальной БД.
   Map<String, dynamic>? _lastLoginSnapshot;
@@ -107,9 +115,9 @@ class MaxClient {
   StreamSubscription<Uint8List>? _sub;
   int _seq = 0;
 
-  /// Keepalive-таймер: шлёт PING (opcode 1) раз в [_pingInterval], пока сокет
-  /// жив. Держит соединение, чтобы сервер не рвал его по idle и не запускался
-  /// шторм reconnect+login (главная причина банов номера, см. MaxOp.ping).
+  /// Keepalive-таймер: шлёт PROFILE (opcode 16, пустой payload) раз в
+  /// [_pingInterval], пока сокет жив. Держит соединение, чтобы сервер не рвал
+  /// его по idle и не запускался шторм reconnect+login (главная причина банов).
   Timer? _pingTimer;
   static const Duration _pingInterval = Duration(seconds: 25);
   bool _closed = false;
@@ -158,7 +166,6 @@ class MaxClient {
         cancelOnError: false,
       );
       await _initSession();
-      _startKeepalive();
       _emitState(MaxConnectionState.connected);
     } catch (e) {
       // INIT упал или сокет порвался — приведём состояние к чистому
@@ -272,9 +279,12 @@ class MaxClient {
     }
   }
 
-  /// Запустить keepalive: периодический PING (opcode 1) держит соединение,
-  /// чтобы сервер не дропал его по idle. Это убирает шторм reconnect+login,
-  /// который антифрод MAX считает автоматизацией и банит номер.
+  /// Запустить keepalive: периодический PROFILE-запрос (opcode 16, пустой
+  /// payload) держит соединение, чтобы сервер не дропал его по idle. Это убирает
+  /// шторм reconnect+login, который антифрод MAX считает автоматизацией и банит
+  /// номер. Дедицированный ping-опкод протокола в декомпиле не подтверждён,
+  /// поэтому heartbeat — заведомо валидный запрос PROFILE (как в рабочем форке).
+  /// Стартуется из login(), после успешной авторизации.
   void _startKeepalive() {
     _pingTimer?.cancel();
     _pingTimer = Timer.periodic(_pingInterval, (_) => _sendPing());
@@ -285,15 +295,19 @@ class MaxClient {
     _pingTimer = null;
   }
 
-  /// Один PING. Best-effort: важны сами исходящие байты (сервер не считает
-  /// соединение простаивающим). Таймаут короткий — если PING не прошёл, сокет
-  /// уже мёртв и сработает обычный путь onDone → reconnect.
+  /// Один PROFILE-heartbeat (opcode 16, пустой payload). Best-effort: важны
+  /// исходящие байты (сервер не считает соединение idle). Ошибку глушим в
+  /// debug-лог; реальный дроп/таймаут поймает onDone → reconnect.
   Future<void> _sendPing() async {
-    if (_socket == null) return;
+    if (_socket == null || _closed) return;
     try {
-      await _request(MaxOp.ping, const {}, timeout: const Duration(seconds: 10));
-    } catch (_) {
-      // Соединение мертво — обработается обычным reconnect-путём.
+      await _request(
+        MaxOp.profile,
+        const <String, Object?>{},
+        timeout: const Duration(seconds: 15),
+      );
+    } catch (e) {
+      _log.d('keepalive ping failed: $e');
     }
   }
 
@@ -413,6 +427,15 @@ class MaxClient {
     );
     if (f.cmd != 1) throw MaxLoginFailed('LOGIN cmd=${f.cmd}');
     _token = token;
+    // Анти-бан (правила 1–3): фиксируем момент успешного LOGIN для throttle
+    // (не логиниться чаще 1/30с); keepalive стартуем именно здесь, после
+    // авторизации (как рабочий форк); снимаем «навсегда»-отмену reconnect,
+    // если её поставил мёртвый токен.
+    _sinceLogin
+      ..reset()
+      ..start();
+    _startKeepalive();
+    _reconnect.rearm();
     final snap = _asMap(f.decoded);
     if (interactive) {
       // raw кешируем всегда (нужен для байт-скана id), снэпшот — если декод
@@ -431,6 +454,13 @@ class MaxClient {
     List<Map<String, Object?>>? attaches,
     int? replyToId,
   }) async {
+    // Анти-бан (правило 6): не слать пустой/whitespace payload без вложений —
+    // сервер на пустоту отвечает ошибкой И РВЁТ сокет → петля reconnect+login.
+    // Медиа без подписи (есть attaches) — валидна.
+    final hasAttaches = attaches != null && attaches.isNotEmpty;
+    if (text.trim().isEmpty && !hasAttaches) {
+      throw const MaxError('refusing to send empty payload (anti-ban rule 6)');
+    }
     // Полный payload официального клиента (см. bridge.py + maxclient):
     // message.cid — клиентский id (millis), detectShare включает превью
     // ссылок, notify шлёт нотификацию получателю, randomId == cid для дедупа.
@@ -454,7 +484,20 @@ class MaxClient {
       'notify': true,
       'randomId': cid,
     });
-    if (f.cmd != 1) throw MaxError('send_message cmd=${f.cmd}');
+    if (f.cmd != 1) {
+      // cmd=3 = бизнес-отказ. Перманентные причины повторять нельзя — иначе
+      // вечный долбёж сервера = бан-сигнал (правило 6). Классифицируем.
+      if (f.cmd == 3) {
+        String? reason;
+        final d = f.decoded;
+        if (d is Map) {
+          final m = d.map((k, v) => MapEntry(k.toString(), v));
+          reason = m['error']?.toString() ?? m['message']?.toString();
+        }
+        throw MaxRejected('send_message rejected', f.cmd, reason: reason);
+      }
+      throw MaxError('send_message cmd=${f.cmd}');
+    }
     return _asMap(f.decoded);
   }
 
@@ -830,6 +873,7 @@ class MaxClient {
   }
 
   void _handleDrop() {
+    _stopKeepalive();
     // Уже синхронно убираем подписку и сокет — без флага «навсегда».
     unawaited(_sub?.cancel() ?? Future<void>.value());
     _sub = null;
@@ -1038,32 +1082,32 @@ String? parseDohAnswer(String body) {
   return null;
 }
 
-/// Экспоненциальный backoff: 2s → 4s → 8s → 16s → 32s → 60s (cap).
-/// При успехе сбрасывается в 2s. Защищён от двойного запуска флагом
-/// [_running].
+/// Менеджер переподключения. Тайминги делегированы в [ReconnectPolicy]: пауза
+/// НЕ сбрасывается в базу на каждый успех, а ограничивается потолком частоты
+/// LOGIN (minAuthInterval=30с) и предохранителем флаппинга (>6 попыток за 5мин
+/// → 8мин пауза). Это убирает реконнект-шторм, из-за которого банили номер.
+/// Обработка мёртвого токена (MaxLoginFailed → _authInvalid) сохранена.
 class _ReconnectManager {
-  _ReconnectManager(this._client, this._log);
+  _ReconnectManager(this._client, this._log, [ReconnectPolicy? policy])
+    : _policy = policy ?? ReconnectPolicy();
 
   final MaxClient _client;
   final Logger _log;
+  final ReconnectPolicy _policy;
 
-  // База 5с (не 2с): с рабочим keepalive соединение почти не рвётся, а если
-  // рвётся — не частим. cap 60с.
-  static const _baseDelay = Duration(seconds: 5);
-  static const _maxDelay = Duration(seconds: 60);
-
-  Duration _delay = _baseDelay;
+  int _attempt = 0;
   bool _running = false;
   bool _cancelled = false;
   Timer? _timer;
-  final _rng = Random();
+
+  final Stopwatch _clock = Stopwatch()..start();
+  final List<Duration> _attempts = <Duration>[];
 
   /// Запускает цикл переподключения, если он ещё не запущен.
   void start() {
-    if (_running || _cancelled) return;
-    if (_client._closed) return;
+    if (_running || _cancelled || _client._closed) return;
     _running = true;
-    _delay = _baseDelay;
+    _attempt = 0;
     _schedule();
   }
 
@@ -1075,30 +1119,50 @@ class _ReconnectManager {
     _timer = null;
   }
 
-  void _schedule() {
-    _timer?.cancel();
-    // Джиттер 0–1500мс: реконнекты не выстраиваются в ровный «роботический»
-    // интервал и не бьют сервер залпом.
-    final wait = _delay + Duration(milliseconds: _rng.nextInt(1500));
-    _log.i('reconnect scheduled in ${wait.inMilliseconds}ms');
-    _timer = Timer(wait, _attempt);
+  /// Снять «навсегда»-отмену после успешного LOGIN (мёртвый токен ставит
+  /// _cancelled=true; без этого повторный вход не восстанавливал авто-реконнект).
+  void rearm() {
+    _cancelled = false;
   }
 
-  Future<void> _attempt() async {
+  void _pruneWindow() {
+    final cutoff = _clock.elapsed - _policy.breakerWindow;
+    _attempts.removeWhere((t) => t < cutoff);
+  }
+
+  void _schedule() {
+    _timer?.cancel();
+    _pruneWindow();
+    final delay = _policy.nextDelay(
+      attempt: _attempt,
+      sinceLastLogin: _client.sinceLastLogin,
+      attemptsInWindow: _attempts.length,
+    );
+    _log.i(
+      'reconnect через ${delay.inSeconds}s (попытка $_attempt, '
+      'в окне ${_attempts.length}, с LOGIN ${_client.sinceLastLogin.inSeconds}s)',
+    );
+    _timer = Timer(delay, _tryReconnect);
+  }
+
+  Future<void> _tryReconnect() async {
     if (_cancelled || _client._closed) {
       _running = false;
       return;
     }
+    // Считаем ВСЕ попытки реконнекта в окне предохранителя (консервативно
+    // против бана — тормозим раньше). Сознательное отклонение от буквы правила
+    // 3 «только успешные re-auth» в безопасную сторону, как в рабочем форке.
+    _attempts.add(_clock.elapsed);
     try {
       await _client.reconnect();
       _log.i('reconnect succeeded');
-      _delay = _baseDelay;
+      _attempt = 0;
       _running = false;
     } catch (e) {
       _log.w('reconnect attempt failed: $e');
       // Токен мёртв (FAIL_LOGIN_TOKEN / login.cred / login.token) — нет смысла
-      // долбить сервер протухшим токеном. Останавливаем цикл, чистим токен и
-      // сигналим, чтобы UI вышел на экран входа.
+      // долбить сервер протухшим токеном. Стоп, чистим токен, сигналим UI.
       if (e is MaxLoginFailed) {
         _client._token = null;
         _running = false;
@@ -1107,9 +1171,7 @@ class _ReconnectManager {
         _client._authInvalid?.call();
         return;
       }
-      // Удваиваем, но не больше cap.
-      final next = _delay * 2;
-      _delay = next > _maxDelay ? _maxDelay : next;
+      _attempt++;
       if (!_cancelled && !_client._closed) {
         _schedule();
       } else {

@@ -677,7 +677,16 @@ class MaxClient {
 
   Future<Map<String, dynamic>> findContactByPhone(String phone) async {
     final f = await _request(MaxOp.contactByPhone, {'phone': phone});
-    if (f.cmd != 1) throw MaxError('contactByPhone cmd=${f.cmd}');
+    if (f.cmd != 1) {
+      // Сервер кладёт человекочитаемую причину в payload (напр. cmd=3
+      // {error: contact.not.found, localizedMessage: «Контакт не найден»}) —
+      // прокидываем её, чтобы UI показал понятный текст вместо «cmd=3».
+      final d = f.decoded;
+      final msg = (d is Map)
+          ? (d['localizedMessage'] ?? d['message'] ?? d['error'])?.toString()
+          : null;
+      throw MaxError(msg ?? 'contactByPhone cmd=${f.cmd}');
+    }
     return _parseContact(f);
   }
 

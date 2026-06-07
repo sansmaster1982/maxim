@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/errors.dart';
 import '../../data/max/models/contact.dart';
 import '../../data/repositories/contacts_repository.dart';
 import '../../state/chats_controller.dart';
@@ -293,7 +294,17 @@ class _ContactsScreenState extends ConsumerState<ContactsScreen> {
         SnackBar(content: Text('Найден: ${c.name ?? c.phone ?? c.id}')),
       );
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+      // contact.not.found → показываем понятный серверный текст; иначе сырьё.
+      final msg = e is MaxError ? e.message : '$e';
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            msg.contains('найден') || msg.contains('not.found')
+                ? 'Контакт не найден. Возможно, номер не зарегистрирован в MAX.'
+                : 'Не удалось найти: $msg',
+          ),
+        ),
+      );
     }
   }
 }

@@ -1,23 +1,31 @@
+import 'package:logger/logger.dart';
+
 import '../local/database.dart';
 import '../max/max_client.dart';
 import '../max/models/chat.dart';
 
 class ChatsRepository {
-  ChatsRepository({required this.client, required this.db});
+  ChatsRepository({required this.client, required this.db, Logger? logger})
+      : _log = logger ?? Logger();
 
   final MaxClient client;
   final AppDatabase db;
+  final Logger _log;
 
   Future<List<MaxChat>> listLocal() async {
     final chats = await db.chats();
     // Для диалогов с плейсхолдерным именем («Чат N») или пустым подставляем
     // имя контакта — иначе в списке чат называется числом.
+    _log.i('DIAG listLocal: ${chats.length} чатов из БД');
     final out = <MaxChat>[];
     for (final c in chats) {
       final isPlaceholder =
           c.title == null || c.title!.isEmpty || c.title == 'Чат ${c.id}';
       if (isPlaceholder) {
         final contact = await db.contact(c.id);
+        _log.i('DIAG placeholder id=${c.id} title="${c.title}" '
+            'serverChatId=${c.serverChatId} peerUserId=${c.peerUserId} '
+            'isGroup=${c.isGroup} contact=${contact?.name}');
         final name = contact?.name;
         if (name != null && name.isNotEmpty) {
           out.add(c.copyWith(title: name));

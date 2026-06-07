@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart';
 
@@ -19,13 +21,24 @@ import '../data/repositories/upload_repository.dart';
 /// Для прод-релиза в App Store выставить false.
 const bool kDeviceDiagnostics = true;
 
+/// Файл диагностического лога (Documents/maxim_diag.log). Заполняется в main().
+/// Логи дублируются в него, чтобы снять с устройства через afc — idevicesyslog
+/// Flutter-логи в release-сборке не показывает.
+File? diagLogFile;
+
 final loggerProvider = Provider<Logger>((ref) {
+  final outputs = <LogOutput>[ConsoleOutput()];
+  final f = diagLogFile;
+  if (kDeviceDiagnostics && f != null) {
+    outputs.add(FileOutput(file: f));
+  }
   return Logger(
     filter: kDeviceDiagnostics ? ProductionFilter() : DevelopmentFilter(),
     level: Level.debug,
     printer: kDeviceDiagnostics
         ? SimplePrinter(colors: false, printTime: true)
         : PrettyPrinter(methodCount: 0),
+    output: MultiOutput(outputs),
   );
 });
 
@@ -91,6 +104,7 @@ final chatsRepositoryProvider = FutureProvider<ChatsRepository>((ref) async {
   return ChatsRepository(
     client: ref.watch(maxClientProvider),
     db: db,
+    logger: ref.watch(loggerProvider),
   );
 });
 

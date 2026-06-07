@@ -6,7 +6,7 @@ import 'attach.dart';
 
 enum MessageDirection { incoming, outgoing }
 
-enum MessageStatus { pending, sent, delivered, read, failed }
+enum MessageStatus { pending, sent, delivered, read, failed, rejected }
 
 class MaxMessage extends Equatable {
   final int? id;

@@ -283,6 +283,22 @@ class AppDatabase {
     );
   }
 
+  Future<void> deleteChat(int id) async {
+    await _db.delete('chats', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Перенести сообщения из одного локального чата в другой — для дедупа
+  /// диалога (синк-строка по серверному chatId сливается со строкой, открытой
+  /// из контакта по peerUserId).
+  Future<void> reassignMessages(int fromChatId, int toChatId) async {
+    await _db.update(
+      'messages',
+      {'chat_id': toChatId},
+      where: 'chat_id = ?',
+      whereArgs: [fromChatId],
+    );
+  }
+
   /// Локальная строка чата по подтверждённому серверному chatId.
   Future<MaxChat?> chatByServerId(int serverChatId) async {
     final rows = await _db.query(

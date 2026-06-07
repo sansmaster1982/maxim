@@ -970,11 +970,15 @@ class MessagesRepository {
   Future<void> _wipeOnAccountChange(int? myId) async {
     if (myId == null) return;
     final last = await storage.readLastSyncedAccountId();
-    if (last != null && last != myId) {
-      _log.i('DIAG account changed ($last -> $myId) — wiping local DB');
+    if (last != myId) {
+      // last == null → первый синк этой версии: чистим возможные чужие/старые
+      // чаты (напр. с прежней SIM), оставшиеся от прошлых входов в эту
+      // установку. last != null && != myId → реальная смена аккаунта. В обоих
+      // случаях локальная база — от другого аккаунта, её надо очистить.
+      _log.i('DIAG account/version change (last=$last, now=$myId) — wiping DB');
       await db.wipe();
+      await storage.writeLastSyncedAccountId(myId);
     }
-    if (last != myId) await storage.writeLastSyncedAccountId(myId);
   }
 
   Future<void> _ingestSyncedChats(List<dynamic> chats) async {

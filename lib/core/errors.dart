@@ -26,17 +26,24 @@ class MaxTimeout extends MaxError {
 /// Бизнес-отказ сервера (cmd=3). [reason] — код из payload
 /// ({error, message, localizedMessage}). Повтор помогает ТОЛЬКО если причина
 /// транзиентная; постоянные коды (whitelist) повторять нельзя — иначе вечный
-/// долбёж сервера, а это бан-сигнал (анти-бан правило 6).
+/// долбёж сервера (а это бан-сигнал).
 class MaxRejected extends MaxError {
   final int cmd;
   final String? reason;
   const MaxRejected(super.message, this.cmd, {this.reason});
 
+  /// Постоянные отказы: получатель/чат не существует/заблокирован. Только их
+  /// дропаем. Всё прочее (throttle, flood-wait, временная недоступность)
+  /// считаем транзиентным и повторяем. Незнакомый код ⇒ НЕ permanent ⇒ повтор
+  /// (безопаснее потери сообщения).
   bool get isPermanent => const {
     'user.not.found',
     'chat.not.found',
     'recipient.not.found',
     'user.blocked',
+    // Ошибка валидации payload (например пустой текст): повтор того же
+    // тела не поможет, а сервер на него РВЁТ соединение → бесконечная петля.
+    'proto.payload',
   }.contains(reason);
 
   @override

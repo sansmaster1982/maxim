@@ -11,7 +11,6 @@ class MessageBubble extends StatelessWidget {
     this.onRetry,
     this.chatId,
     this.messageServerId,
-    this.onReactionTap,
   });
   final MaxMessage message;
 
@@ -25,9 +24,6 @@ class MessageBubble extends StatelessWidget {
   /// Серверный id сообщения для download endpoint. Если null, attach
   /// без локального пути не сможет начать скачиваться.
   final int? messageServerId;
-
-  /// Тап по чипу реакции (эмодзи) — переключить свою реакцию.
-  final void Function(String emoji)? onReactionTap;
 
   @override
   Widget build(BuildContext context) {
@@ -121,44 +117,10 @@ class MessageBubble extends StatelessWidget {
                     statusIcon,
                 ]
               ],
-            ),
-            if (message.hasReactions) ...[
-              const SizedBox(height: 6),
-              _reactionChips(context),
-            ],
+            )
           ],
         ),
       ),
-    );
-  }
-
-  Widget _reactionChips(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Wrap(
-      spacing: 4,
-      runSpacing: 4,
-      children: [
-        for (final e in message.reactions.entries)
-          GestureDetector(
-            onTap: onReactionTap == null ? null : () => onReactionTap!(e.key),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                color: e.key == message.yourReaction
-                    ? scheme.primary.withValues(alpha: 0.18)
-                    : scheme.surface.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(12),
-                border: e.key == message.yourReaction
-                    ? Border.all(color: scheme.primary)
-                    : null,
-              ),
-              child: Text(
-                '${e.key} ${e.value}',
-                style: const TextStyle(fontSize: 12),
-              ),
-            ),
-          ),
-      ],
     );
   }
 
@@ -221,6 +183,7 @@ class MessageBubble extends StatelessWidget {
       case MessageStatus.failed:
         return Icons.error_outline;
       case MessageStatus.rejected:
+        // Сервер отверг навсегда (например получатель не найден) — не повтор.
         return Icons.block;
     }
   }

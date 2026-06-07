@@ -3,8 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
 import '../../state/session_controller.dart';
-import '../../state/theme_controller.dart';
-import 'sessions_screen.dart';
+import 'devices_screen.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -26,19 +25,13 @@ class SettingsScreen extends ConsumerWidget {
                 'proto v${MaxProto.protoVersion}'),
             leading: const Icon(Icons.cloud_outlined),
           ),
-          ListTile(
-            title: const Text('Тема оформления'),
-            subtitle: Text(_themeLabel(ref.watch(themeModeProvider))),
-            leading: const Icon(Icons.brightness_6_outlined),
-            onTap: () => _pickTheme(context, ref),
-          ),
           const Divider(),
           ListTile(
-            title: const Text('Активные сессии'),
-            subtitle: const Text('Устройства, где выполнен вход'),
+            title: const Text('Устройства и сессии'),
+            subtitle: const Text('Активные входы · завершить чужие'),
             leading: const Icon(Icons.devices_outlined),
             onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const SessionsScreen()),
+              MaterialPageRoute(builder: (_) => const DevicesScreen()),
             ),
           ),
           const Divider(),
@@ -76,38 +69,5 @@ class SettingsScreen extends ConsumerWidget {
         ],
       ),
     );
-  }
-
-  String _themeLabel(ThemeMode m) {
-    switch (m) {
-      case ThemeMode.system:
-        return 'Системная';
-      case ThemeMode.light:
-        return 'Светлая';
-      case ThemeMode.dark:
-        return 'Тёмная';
-    }
-  }
-
-  Future<void> _pickTheme(BuildContext context, WidgetRef ref) async {
-    final current = ref.read(themeModeProvider);
-    final picked = await showDialog<ThemeMode>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('Тема оформления'),
-        children: [
-          for (final m in ThemeMode.values)
-            RadioListTile<ThemeMode>(
-              value: m,
-              groupValue: current,
-              title: Text(_themeLabel(m)),
-              onChanged: (v) => Navigator.of(ctx).pop(v),
-            ),
-        ],
-      ),
-    );
-    if (picked != null) {
-      await ref.read(themeModeProvider.notifier).set(picked);
-    }
   }
 }

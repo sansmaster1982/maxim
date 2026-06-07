@@ -116,7 +116,7 @@ class ProfileScreen extends ConsumerWidget {
                 leading: const Icon(Icons.notifications_outlined),
                 title: const Text('Уведомления'),
                 subtitle: const Text('Включены'),
-                trailing: Switch.adaptive(
+                trailing: Switch(
                   value: true,
                   onChanged: (_) => _stub(context, 'Mute'),
                 ),

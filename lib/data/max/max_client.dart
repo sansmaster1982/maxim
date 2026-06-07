@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:http/http.dart' as http;
 import 'package:logger/logger.dart';
 import 'package:uuid/uuid.dart';
 
@@ -13,9 +12,7 @@ import 'contact_name.dart';
 import 'lz4_block.dart';
 import 'max_codec.dart';
 import 'models/incoming_message.dart';
-import 'models/push_event.dart';
 import 'raw_parsers.dart';
-import 'reactions.dart';
 import 'reconnect_policy.dart';
 
 /// Колбэк для отладки push-фреймов (как `on_push_debug` в Python-версии).
@@ -33,7 +30,6 @@ class MaxClient {
     Logger? logger,
     this.deviceIdLoader,
     this.userAgentLoader,
-    this.zstdDecoder,
   }) : _log = logger ?? Logger(printer: PrettyPrinter(methodCount: 0)) {
     _reconnect = _ReconnectManager(this, _log);
   }
@@ -52,13 +48,6 @@ class MaxClient {
   final Future<Map<String, Object?>> Function(String deviceType)?
       userAgentLoader;
 
-  /// Подключаемый zstd-декодер для кадров с cof=0xFF. По реверсу
-  /// (one.me.sdk.zsrd.ZstdUtil) это стандартный zstd-кадр БЕЗ словаря, так что
-  /// подойдёт любой generic zstd. null = такие кадры не распаковываются (редки;
-  /// основной трафик — LZ4). Платформенную реализацию (FFI/плагин) передаём
-  /// сюда, не трогая клиент и не навязывая нативную зависимость iOS-сборке.
-  final Uint8List Function(Uint8List input)? zstdDecoder;
-
   /// Вызывается когда сервер отверг сохранённый токен (FAIL_LOGIN_TOKEN) —
   /// UI должен разлогинить и показать экран входа, а не висеть в reconnect.
   void Function()? _authInvalid;
@@ -67,23 +56,17 @@ class MaxClient {
   String? _token;
 
   /// Часы с последнего успешного LOGIN — для anti-storm throttle
-  /// (ReconnectPolicy.authThrottle). НЕ сбрасывается при дисконнекте: считаем
-  /// время с последней АВТОРИЗАЦИИ, а не с разрыва. До первого LOGIN не
-  /// запущен → sinceLastLogin = «давно» → первый вход не троттлится.
+  /// (см. [ReconnectPolicy.authThrottle]). Не сбрасывается при дисконнекте:
+  /// считаем именно время с последней АВТОРИЗАЦИИ, а не с разрыва.
   final Stopwatch _sinceLogin = Stopwatch();
   Duration get sinceLastLogin =>
       _sinceLogin.isRunning ? _sinceLogin.elapsed : const Duration(days: 3650);
 
-  /// Снэпшот последнего успешного LOGIN (interactive=true): профиль, чаты,
-  /// контакты. Читается SyncRepository для наполнения локальной БД.
-  Map<String, dynamic>? _lastLoginSnapshot;
-  Map<String, dynamic>? get lastLoginSnapshot => _lastLoginSnapshot;
-
-  /// Сырое (распакованное) тело ответа LOGIN. Fallback: когда compact-msgpack
-  /// чатов не декодируется, id чатов добываются байт-сканом
-  /// (RawParsers.extractChatIds), а детали — через CHAT_INFO (op 48).
-  Uint8List? _lastLoginRaw;
-  Uint8List? get lastLoginRaw => _lastLoginRaw;
+  /// Keepalive: пока соединение живо, раз в [_pingInterval] шлём лёгкий
+  /// read-only запрос, чтобы сервер не рвал сокет по простою и не провоцировал
+  /// реконнект-шторм с переавторизацией (главный бан-фактор).
+  Timer? _keepalive;
+  static const Duration _pingInterval = Duration(seconds: 25);
 
   String get deviceId => _deviceId ?? '(unresolved)';
 
@@ -114,25 +97,14 @@ class MaxClient {
   SecureSocket? _socket;
   StreamSubscription<Uint8List>? _sub;
   int _seq = 0;
-
-  /// Keepalive-таймер: шлёт PROFILE (opcode 16, пустой payload) раз в
-  /// [_pingInterval], пока сокет жив. Держит соединение, чтобы сервер не рвал
-  /// его по idle и не запускался шторм reconnect+login (главная причина банов).
-  Timer? _pingTimer;
-  static const Duration _pingInterval = Duration(seconds: 25);
   bool _closed = false;
   final _pending = <int, Completer<MaxFrame>>{};
   final _pushCtrl = StreamController<IncomingMessage>.broadcast();
-  final _eventCtrl = StreamController<MaxPushEvent>.broadcast();
   final _stateCtrl = StreamController<MaxConnectionState>.broadcast();
   MaxConnectionState _state = MaxConnectionState.disconnected;
   final _bufferBuilder = BytesBuilder(copy: false);
 
   Stream<IncomingMessage> get incomingStream => _pushCtrl.stream;
-
-  /// Типизированные server-push события кроме новых сообщений: read (130),
-  /// deleted (142), reactions (155), transcription (293). См. classifyPushEvent.
-  Stream<MaxPushEvent> get pushEvents => _eventCtrl.stream;
   Stream<MaxConnectionState> get connectionState => _stateCtrl.stream;
   MaxConnectionState get currentState => _state;
   String? get token => _token;
@@ -155,7 +127,7 @@ class MaxClient {
     if (deviceType != null) _deviceType = deviceType;
     _emitState(MaxConnectionState.connecting);
     try {
-      final s = await _openSecureSocket(const Duration(seconds: 15));
+      final s = await _openSecureSocket();
       s.setOption(SocketOption.tcpNoDelay, true);
       _socket = s;
       _closed = false;
@@ -181,56 +153,83 @@ class MaxClient {
     }
   }
 
-  /// Открыть TLS-сокет с DoH-fallback. Если системный DNS не резолвит хост или
-  /// режется провайдером — резолвим api.oneme.ru через DNS-over-HTTPS
-  /// (1.1.1.1/8.8.8.8 по IP) и коннектимся по IP, но TLS-хендшейк идёт с
-  /// server_hostname=api.oneme.ru: SNI и проверка сертификата сохраняются
-  /// (никакого обхода TLS). Порт `_open_raw_socket` из maxclient — помогает
-  /// против DNS-блокировки оператором.
-  Future<SecureSocket> _openSecureSocket(Duration timeout) async {
+  /// IP, добытый через DoH — кэш на сессию, чтобы не дёргать DoH на каждом
+  /// reconnect, пока системный DNS «молчит».
+  String? _dohIp;
+
+  /// Открывает TLS-сокет к api.oneme.ru. Сначала обычным путём (системный DNS).
+  /// Если системный DNS не резолвит хост (errno 7 — бывает на Wi-Fi с
+  /// фильтрующим/недоступным DNS), резолвим адрес через DoH (Cloudflare, по IP,
+  /// мимо системного DNS) и коннектимся по IP с SNI и проверкой сертификата на
+  /// api.oneme.ru. Так клиент поднимается и на мобильной, и на Wi-Fi, чей DNS
+  /// не отдаёт адрес MAX.
+  Future<SecureSocket> _openSecureSocket() async {
     try {
       return await SecureSocket.connect(
         MaxProto.host,
         MaxProto.port,
-        timeout: timeout,
+        timeout: const Duration(seconds: 15),
       );
     } on SocketException catch (e) {
-      _log.w('прямое подключение к ${MaxProto.host} не удалось ($e); пробуем DoH');
-      final ip = await _dohResolve(MaxProto.host);
+      final isDnsFail = e.osError?.errorCode == 7 ||
+          e.message.contains('Failed host lookup') ||
+          e.message.contains('No address associated');
+      if (!isDnsFail) rethrow;
+      final ip = _dohIp ?? await _resolveViaDoh(MaxProto.host);
       if (ip == null) {
-        throw MaxNotConnected(
-          'Не удалось разрешить ${MaxProto.host}. Проверьте интернет, DNS или VPN.',
-        );
+        _log.w('DoH-фолбэк не дал IP для ${MaxProto.host}');
+        rethrow;
       }
-      _log.i('DoH разрешил ${MaxProto.host} -> $ip');
-      final raw = await Socket.connect(ip, MaxProto.port, timeout: timeout);
-      raw.setOption(SocketOption.tcpNoDelay, true);
-      // Соединились по IP, но SNI и проверка сертификата — по реальному хосту.
-      return SecureSocket.secure(raw, host: MaxProto.host);
+      _dohIp = ip;
+      try {
+        final raw = await Socket.connect(
+          ip,
+          MaxProto.port,
+          timeout: const Duration(seconds: 15),
+        );
+        raw.setOption(SocketOption.tcpNoDelay, true);
+        // host: задаёт SNI и имя для проверки сертификата — коннект по IP,
+        // но TLS валидируется против api.oneme.ru.
+        final secure = await SecureSocket.secure(raw, host: MaxProto.host);
+        _log.i('подключение через DoH-IP $ip (системный DNS молчит)');
+        return secure;
+      } catch (_) {
+        _dohIp = null; // IP протух/неверный — сбросим кэш
+        rethrow;
+      }
     }
   }
 
-  /// Резолв A-записи через DNS-over-HTTPS. Endpoint'ы заданы по IP, чтобы не
-  /// зависеть от системного DNS. Порт `_doh_resolve` из maxclient.
-  Future<String?> _dohResolve(String host) async {
-    const endpoints = [
-      'https://1.1.1.1/dns-query?name=',
-      'https://8.8.8.8/resolve?name=',
-    ];
-    for (final base in endpoints) {
-      try {
-        final resp = await http
-            .get(
-              Uri.parse('$base$host&type=A'),
-              headers: const {'accept': 'application/dns-json'},
-            )
-            .timeout(const Duration(seconds: 8));
-        if (resp.statusCode != 200) continue;
-        final ip = parseDohAnswer(resp.body);
-        if (ip != null) return ip;
-      } catch (_) {
-        continue;
+  /// Резолв A-записи через DNS-over-HTTPS (Cloudflare). Запрос идёт на IP
+  /// 1.1.1.1/1.0.0.1, поэтому не зависит от системного DNS.
+  Future<String?> _resolveViaDoh(String host) async {
+    final http = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      for (final resolver in const ['1.1.1.1', '1.0.0.1']) {
+        try {
+          final uri =
+              Uri.parse('https://$resolver/dns-query?name=$host&type=A');
+          final req = await http.getUrl(uri);
+          req.headers.set('accept', 'application/dns-json');
+          final resp = await req.close().timeout(const Duration(seconds: 8));
+          if (resp.statusCode != 200) continue;
+          final body = await resp.transform(utf8.decoder).join();
+          final data = jsonDecode(body);
+          if (data is Map && data['Answer'] is List) {
+            for (final a in (data['Answer'] as List)) {
+              // type 1 = A-запись (IPv4)
+              if (a is Map && a['type'] == 1) {
+                final ip = a['data']?.toString();
+                if (ip != null && ip.isNotEmpty) return ip;
+              }
+            }
+          }
+        } catch (e) {
+          _log.d('DoH $resolver: $e');
+        }
       }
+    } finally {
+      http.close(force: true);
     }
     return null;
   }
@@ -242,8 +241,7 @@ class MaxClient {
     await connect();
     final t = _token;
     if (t != null && t.isNotEmpty) {
-      // На реконнекте снэпшот уже в БД — не тянем его снова, экономим трафик.
-      await login(t, interactive: false);
+      await login(t);
     }
   }
 
@@ -276,38 +274,6 @@ class MaxClient {
     });
     if (f.cmd != 1) {
       throw MaxError('INIT failed cmd=${f.cmd}');
-    }
-  }
-
-  /// Запустить keepalive: периодический PROFILE-запрос (opcode 16, пустой
-  /// payload) держит соединение, чтобы сервер не дропал его по idle. Это убирает
-  /// шторм reconnect+login, который антифрод MAX считает автоматизацией и банит
-  /// номер. Дедицированный ping-опкод протокола в декомпиле не подтверждён,
-  /// поэтому heartbeat — заведомо валидный запрос PROFILE (как в рабочем форке).
-  /// Стартуется из login(), после успешной авторизации.
-  void _startKeepalive() {
-    _pingTimer?.cancel();
-    _pingTimer = Timer.periodic(_pingInterval, (_) => _sendPing());
-  }
-
-  void _stopKeepalive() {
-    _pingTimer?.cancel();
-    _pingTimer = null;
-  }
-
-  /// Один PROFILE-heartbeat (opcode 16, пустой payload). Best-effort: важны
-  /// исходящие байты (сервер не считает соединение idle). Ошибку глушим в
-  /// debug-лог; реальный дроп/таймаут поймает onDone → reconnect.
-  Future<void> _sendPing() async {
-    if (_socket == null || _closed) return;
-    try {
-      await _request(
-        MaxOp.profile,
-        const <String, Object?>{},
-        timeout: const Duration(seconds: 15),
-      );
-    } catch (e) {
-      _log.d('keepalive ping failed: $e');
     }
   }
 
@@ -403,90 +369,119 @@ class MaxClient {
     return t;
   }
 
-  /// Логин по токену. При [interactive] = true (первый вход) сервер возвращает
-  /// полный снэпшот — профиль, чаты, контакты (~200+ КБ); при false чаты не
-  /// приходят (проверено в web_demo/bridge.py). Снэпшот кешируется в
-  /// [lastLoginSnapshot] для наполнения БД. Возвращает декодированный снэпшот.
-  Future<Map<String, dynamic>> login(
-    String token, {
-    bool interactive = true,
-  }) async {
-    final f = await _request(
-      MaxOp.login,
-      {
-        'token': token,
-        'interactive': interactive,
-        'chatsCount': 40,
-        'chatsSync': 0,
-        'contactsSync': 0,
-        'presenceSync': 0,
-        'draftsSync': 0,
-      },
-      // Снэпшот большой и едет LZ4-распаковкой — даём запас по времени.
-      timeout: const Duration(seconds: 45),
-    );
+  /// Логин по сохранённому токену. Возвращает raw payload, оттуда вызывающий
+  /// код может вытащить контакты/чаты при синхронизации.
+  final _syncedChats = StreamController<List<dynamic>>.broadcast();
+
+  /// Чаты из ответа LOGIN (op 19) вместе с их lastMessage. Нужны, чтобы
+  /// восстановить входящие сообщения/медиа, если живой push (op 128) был
+  /// пропущен на обрыве: на каждом reconnect LOGIN отдаёт свежий lastMessage.
+  Stream<List<dynamic>> get syncedChatsStream => _syncedChats.stream;
+
+  Future<Uint8List> login(String token) async {
+    final f = await _request(MaxOp.login, {
+      'token': token,
+      'interactive': false,
+      'chatsCount': 40,
+      'chatsSync': 0,
+      'contactsSync': 0,
+      'presenceSync': 0,
+      'draftsSync': 0,
+    });
     if (f.cmd != 1) throw MaxLoginFailed('LOGIN cmd=${f.cmd}');
     _token = token;
-    // Анти-бан (правила 1–3): фиксируем момент успешного LOGIN для throttle
-    // (не логиниться чаще 1/30с); keepalive стартуем именно здесь, после
-    // авторизации (как рабочий форк); снимаем «навсегда»-отмену reconnect,
-    // если её поставил мёртвый токен.
     _sinceLogin
       ..reset()
       ..start();
     _startKeepalive();
+    // Снимаем «навсегда»-отмену reconnect, которую мог поставить мёртвый токен
+    // (MaxLoginFailed) ранее: после успешного LOGIN авто-реконнект снова нужен.
     _reconnect.rearm();
-    final snap = _asMap(f.decoded);
-    if (interactive) {
-      // raw кешируем всегда (нужен для байт-скана id), снэпшот — если декод
-      // дал непустую карту.
-      _lastLoginRaw = f.body;
-      if (snap.isNotEmpty) _lastLoginSnapshot = snap;
+    final dec = f.decoded;
+    if (dec is Map) {
+      final chats = dec['chats'];
+      if (chats is List && chats.isNotEmpty && _syncedChats.hasListener) {
+        _syncedChats.add(chats);
+      }
     }
-    return snap;
+    return f.body;
+  }
+
+  // ───────────────────────── keepalive ────────────────────────
+
+  void _startKeepalive() {
+    _keepalive?.cancel();
+    _keepalive = Timer.periodic(_pingInterval, (_) => unawaited(_ping()));
+  }
+
+  void _stopKeepalive() {
+    _keepalive?.cancel();
+    _keepalive = null;
+  }
+
+  /// Лёгкий heartbeat: read-only запрос профиля (op 16) держит соединение
+  /// тёплым и заодно проверяет живость. Дедицированный ping-опкод протокола
+  /// в декомпиле не подтверждён, поэтому используем заведомо валидный запрос.
+  Future<void> _ping() async {
+    if (_socket == null || _closed) return;
+    try {
+      await _request(
+        MaxOp.profile,
+        const <String, Object?>{},
+        timeout: const Duration(seconds: 15),
+      );
+    } catch (e) {
+      // Реальный дроп/таймаут обработают onError/onDone → reconnect.
+      _log.d('keepalive ping failed: $e');
+    }
   }
 
   // ───────────────────────── messaging ────────────────────────
 
-  Future<Map<String, dynamic>> sendMessage(
-    int chatId,
-    String text, {
+  /// Отправка сообщения (op 64). Сервер принимает ЛИБО [chatId] (существующий
+  /// чат/группа/канал), ЛИБО [peerUserId] (новый диалог 1:1) — ровно один.
+  /// [cid] — клиентский id ВНУТРИ message (findings: lzc.java); по нему дедупим
+  /// эхо-push. Раньше форк клал peer userId в chatId → user.not.found.
+  Future<Map<String, dynamic>> sendMessage({
+    int? chatId,
+    int? peerUserId,
+    required String text,
     List<Map<String, Object?>>? attaches,
     int? replyToId,
+    int? cid,
   }) async {
-    // Анти-бан (правило 6): не слать пустой/whitespace payload без вложений —
-    // сервер на пустоту отвечает ошибкой И РВЁТ сокет → петля reconnect+login.
-    // Медиа без подписи (есть attaches) — валидна.
+    assert(
+      (chatId != null && chatId != 0) ||
+          (peerUserId != null && peerUserId != 0),
+      'sendMessage requires chatId or peerUserId',
+    );
     final hasAttaches = attaches != null && attaches.isNotEmpty;
-    if (text.trim().isEmpty && !hasAttaches) {
-      throw const MaxError('refusing to send empty payload (anti-ban rule 6)');
-    }
-    // Полный payload официального клиента (см. bridge.py + maxclient):
-    // message.cid — клиентский id (millis), detectShare включает превью
-    // ссылок, notify шлёт нотификацию получателю, randomId == cid для дедупа.
-    final cid = DateTime.now().millisecondsSinceEpoch;
     final message = <String, Object?>{
-      'cid': cid,
+      'cid': cid ?? DateTime.now().microsecondsSinceEpoch,
       'text': text,
-      'detectShare': true,
     };
-    if (attaches != null && attaches.isNotEmpty) {
+    // detectShare (превью ссылок) — только для чисто текстовых. Для media с
+    // attaches поле не подтверждено findings — сохраняем доказанный payload.
+    if (hasAttaches) {
       message['attaches'] = attaches;
+    } else {
+      message['detectShare'] = false;
     }
     if (replyToId != null) {
-      // Ответ в MAX — это message.link = {type:REPLY, messageId} (подтверждено
-      // vkmax + nyakokitsu/MaxProtoExplanation), не отдельный replyTo.
-      message['link'] = {'type': 'REPLY', 'messageId': replyToId};
+      // ключ reply не подтверждён в декомпиле — сервер либо примет, либо нет.
+      message['replyTo'] = replyToId;
     }
-    final f = await _request(MaxOp.sendMessage, {
-      'chatId': chatId,
+    final payload = <String, Object?>{
       'message': message,
       'notify': true,
-      'randomId': cid,
-    });
+    };
+    if (chatId != null && chatId != 0) {
+      payload['chatId'] = chatId;
+    } else {
+      payload['userId'] = peerUserId;
+    }
+    final f = await _request(MaxOp.sendMessage, payload);
     if (f.cmd != 1) {
-      // cmd=3 = бизнес-отказ. Перманентные причины повторять нельзя — иначе
-      // вечный долбёж сервера = бан-сигнал (правило 6). Классифицируем.
       if (f.cmd == 3) {
         String? reason;
         final d = f.decoded;
@@ -524,24 +519,6 @@ class MaxClient {
     final f = await _request(MaxOp.editMessage, payload);
     if (f.cmd != 1) throw MaxError('editMessage cmd=${f.cmd}');
     return _asMap(f.decoded);
-  }
-
-  /// Поставить реакцию-эмодзи на сообщение (opcode 178).
-  Future<void> setReaction(int chatId, int messageId, String emoji) async {
-    final f = await _request(
-      MaxOp.msgReaction,
-      reactionSetPayload(chatId, messageId, emoji),
-    );
-    if (f.cmd != 1) throw MaxError('setReaction cmd=${f.cmd}');
-  }
-
-  /// Снять свою реакцию с сообщения (opcode 179).
-  Future<void> cancelReaction(int chatId, int messageId) async {
-    final f = await _request(
-      MaxOp.msgCancelReaction,
-      reactionCancelPayload(chatId, messageId),
-    );
-    if (f.cmd != 1) throw MaxError('cancelReaction cmd=${f.cmd}');
   }
 
   // ───────────────────────── media ────────────────────────────
@@ -582,6 +559,30 @@ class MaxClient {
   Future<Map<String, dynamic>> requestFileUpload({int count = 1}) async {
     final f = await _request(MaxOp.fileUpload, {'count': count});
     if (f.cmd != 1) throw MaxError('fileUpload cmd=${f.cmd}');
+    return _asMap(f.decoded);
+  }
+
+  /// Список активных сессий/устройств аккаунта (op 96 SESSIONS_INFO).
+  /// Формат ответа уточняется по живому логу (парсер в декомпиле generic).
+  Future<Map<String, dynamic>> sessionsInfo() async {
+    final f = await _request(MaxOp.sessionsInfo, const <String, Object?>{});
+    if (f.cmd != 1) throw MaxError('sessionsInfo cmd=${f.cmd}');
+    final m = _asMap(f.decoded);
+    _log.i('sessionsInfo ключи=${m.keys.toList()}');
+    return m;
+  }
+
+  /// Завершить сессии (op 97 SESSIONS_CLOSE). [sessionId] — закрыть одну
+  /// конкретную; [exceptCurrent]=true — закрыть все, кроме текущей.
+  Future<Map<String, dynamic>> closeSessions({
+    int? sessionId,
+    bool exceptCurrent = false,
+  }) async {
+    final payload = <String, Object?>{};
+    if (sessionId != null) payload['sessionId'] = sessionId;
+    if (exceptCurrent) payload['exceptCurrent'] = true;
+    final f = await _request(MaxOp.sessionsClose, payload);
+    if (f.cmd != 1) throw MaxError('sessionsClose cmd=${f.cmd}');
     return _asMap(f.decoded);
   }
 
@@ -705,19 +706,6 @@ class MaxClient {
     };
   }
 
-  /// Список активных сессий/устройств (opcode 96). Ответ парсить parseSessions.
-  Future<Map<String, dynamic>> sessionsInfo() async {
-    final f = await _request(MaxOp.sessionsInfo, {});
-    if (f.cmd != 1) throw MaxError('sessionsInfo cmd=${f.cmd}');
-    return _asMap(f.decoded);
-  }
-
-  /// Завершить указанные сессии (opcode 97).
-  Future<void> sessionsClose(List<int> sessionIds) async {
-    final f = await _request(MaxOp.sessionsClose, {'sessionIds': sessionIds});
-    if (f.cmd != 1) throw MaxError('sessionsClose cmd=${f.cmd}');
-  }
-
   // ───────────────────────── internals ────────────────────────
 
   Future<MaxFrame> _request(
@@ -758,7 +746,15 @@ class MaxClient {
     if (v is Map) {
       return v.map((k, v2) {
         final ks = k.toString();
-        if (ks == 'token' || ks == 'password' || ks == 'trackId') {
+        if (ks == 'token' ||
+            ks == 'password' ||
+            ks == 'trackId' ||
+            ks == 'photoToken' ||
+            ks == 'url' ||
+            ks == 'baseUrl' ||
+            ks == 'photoUrl' ||
+            ks == 'previewData' ||
+            ks == 'thumbhashData') {
           return MapEntry(ks, '<redacted>');
         }
         return MapEntry(ks, _redact(v2));
@@ -775,18 +771,7 @@ class MaxClient {
   Uint8List _decompressBody(int cof, int payloadLen, Uint8List body) {
     if (cof == 0 || body.isEmpty) return body;
     if (cof == 0xFF) {
-      // Стандартный zstd-кадр без словаря. Распакуем подключённым декодером,
-      // если он задан; иначе отдаём сырое и логируем.
-      final dec = zstdDecoder;
-      if (dec != null) {
-        try {
-          return dec(body);
-        } catch (e) {
-          _log.w('zstd decode failed (len=$payloadLen): $e');
-          return body;
-        }
-      }
-      _log.w('zstd-кадр (cof=0xFF): декодер не подключён, отдаю сырое');
+      _log.w('zstd-кадр (cof=0xFF) не распакован — нет нативного zstd');
       return body;
     }
     try {
@@ -847,15 +832,16 @@ class MaxClient {
         continue;
       }
 
+      // Диагностика приёма: логируем КАЖДЫЙ серверный push-кадр (несматченный
+      // по seq), чтобы видеть, доставляет ли сервер входящие по сокету.
+      _log.i(
+        'PUSH cmd=${frame.cmd} op=${frame.opcode} len=${frame.body.length} '
+        'decoded=${_redact(frame.decoded)}',
+      );
       onPushDebug?.call(frame);
       final msg = _parsePush(frame);
       if (msg != null && !_pushCtrl.isClosed) {
         _pushCtrl.add(msg);
-      }
-      // Не-сообщения (read/delete/reactions/transcription) — отдельным потоком.
-      final ev = classifyPushEvent(opcode, decoded, body);
-      if (ev != null && !_eventCtrl.isClosed) {
-        _eventCtrl.add(ev);
       }
     }
   }
@@ -912,6 +898,7 @@ class MaxClient {
     int? msgId;
     int? timeMs;
     var attaches = const <Map<String, dynamic>>[];
+    int? cid;
 
     final d = f.decoded;
     if (d is Map) {
@@ -924,6 +911,7 @@ class MaxClient {
         sender = _toInt(mm['sender']);
         msgId = _toInt(mm['id']);
         timeMs = _toInt(mm['time']);
+        cid = _toInt(mm['cid']);
         final at = mm['attaches'] ?? mm['attachments'];
         if (at is List) {
           attaches = at
@@ -936,6 +924,7 @@ class MaxClient {
         sender = _toInt(dm['sender']);
         msgId = _toInt(dm['id']);
         timeMs = _toInt(dm['time']);
+        cid = _toInt(dm['cid']);
       }
     }
 
@@ -972,6 +961,7 @@ class MaxClient {
       timeMs: timeMs,
       raw: f.body,
       attaches: attaches,
+      cid: cid,
     );
   }
 
@@ -1063,30 +1053,11 @@ class MaxClient {
   }
 }
 
-/// Извлекает первый IPv4 (A-запись, type==1) из JSON-ответа DoH формата
-/// application/dns-json (Cloudflare/Google). Чистая функция — под юнит-тест.
-String? parseDohAnswer(String body) {
-  try {
-    final data = jsonDecode(body);
-    if (data is Map && data['Answer'] is List) {
-      for (final ans in data['Answer'] as List) {
-        if (ans is Map && ans['type'] == 1) {
-          final ip = ans['data']?.toString();
-          if (ip != null && ip.isNotEmpty) return ip;
-        }
-      }
-    }
-  } catch (_) {
-    // невалидный JSON — вернём null
-  }
-  return null;
-}
-
-/// Менеджер переподключения. Тайминги делегированы в [ReconnectPolicy]: пауза
-/// НЕ сбрасывается в базу на каждый успех, а ограничивается потолком частоты
-/// LOGIN (minAuthInterval=30с) и предохранителем флаппинга (>6 попыток за 5мин
-/// → 8мин пауза). Это убирает реконнект-шторм, из-за которого банили номер.
-/// Обработка мёртвого токена (MaxLoginFailed → _authInvalid) сохранена.
+/// Менеджер переподключения. Тайминги делегированы в [ReconnectPolicy]
+/// (тестируется отдельно). Ключевое отличие от прежней версии: пауза НЕ
+/// сбрасывается в 2с на каждый успех, а ограничивается потолком частоты LOGIN —
+/// это убирает реконнект-шторм, из-за которого банили номер. Защищён от
+/// двойного запуска флагом [_running].
 class _ReconnectManager {
   _ReconnectManager(this._client, this._log, [ReconnectPolicy? policy])
     : _policy = policy ?? ReconnectPolicy();
@@ -1100,6 +1071,7 @@ class _ReconnectManager {
   bool _cancelled = false;
   Timer? _timer;
 
+  /// Монотонные часы + времена попыток для предохранителя (флаппинг).
   final Stopwatch _clock = Stopwatch()..start();
   final List<Duration> _attempts = <Duration>[];
 
@@ -1119,8 +1091,11 @@ class _ReconnectManager {
     _timer = null;
   }
 
-  /// Снять «навсегда»-отмену после успешного LOGIN (мёртвый токен ставит
-  /// _cancelled=true; без этого повторный вход не восстанавливал авто-реконнект).
+  /// Снять «навсегда»-отмену после успешного LOGIN. Без этого однажды
+  /// поставленный мёртвым токеном [_cancelled] навсегда глушил авто-реконнект,
+  /// и после повторного входа дроп сети уже не переподключался (socket null,
+  /// отправки висли в очереди). Сам цикл не запускаем — следующий дроп вызовет
+  /// [start]. _running не трогаем (им владеет активный цикл [_tryReconnect]).
   void rearm() {
     _cancelled = false;
   }
@@ -1150,19 +1125,20 @@ class _ReconnectManager {
       _running = false;
       return;
     }
-    // Считаем ВСЕ попытки реконнекта в окне предохранителя (консервативно
-    // против бана — тормозим раньше). Сознательное отклонение от буквы правила
-    // 3 «только успешные re-auth» в безопасную сторону, как в рабочем форке.
-    _attempts.add(_clock.elapsed);
     try {
       await _client.reconnect();
+      // Предохранитель считает только УСПЕШНЫЕ переавторизации (риск бана —
+      // частота re-auth, а не неудачные коннекты к недоступному серверу).
+      // Иначе на лежащей сети 6 неудач → 8 мин офлайна без причины.
+      _attempts.add(_clock.elapsed);
       _log.i('reconnect succeeded');
       _attempt = 0;
       _running = false;
     } catch (e) {
       _log.w('reconnect attempt failed: $e');
       // Токен мёртв (FAIL_LOGIN_TOKEN / login.cred / login.token) — нет смысла
-      // долбить сервер протухшим токеном. Стоп, чистим токен, сигналим UI.
+      // долбить сервер протухшим токеном. Останавливаем цикл, чистим токен и
+      // сигналим, чтобы UI вышел на экран входа.
       if (e is MaxLoginFailed) {
         _client._token = null;
         _running = false;

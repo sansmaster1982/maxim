@@ -10,12 +10,10 @@ import 'package:uuid/uuid.dart';
 import '../../core/errors.dart';
 import '../local/database.dart';
 import '../local/secure_storage.dart';
-import '../max/control_event.dart';
 import '../max/max_client.dart';
 import '../max/models/attach.dart';
 import '../max/models/incoming_message.dart';
 import '../max/models/message.dart';
-import '../max/models/push_event.dart';
 import '../max/models/upload_input.dart';
 import 'upload_repository.dart';
 
@@ -43,25 +41,17 @@ class MessagesRepository {
   static const _maxAttempts = 5;
 
   StreamSubscription<IncomingMessage>? _pushSub;
-  StreamSubscription<MaxPushEvent>? _eventSub;
   StreamSubscription<MaxConnectionState>? _stateSub;
+  StreamSubscription<List<dynamic>>? _syncSub;
   bool _draining = false;
   final _onChat = StreamController<int>.broadcast();
 
   /// Поток id чатов, в которых что-то изменилось.
   Stream<int> get changedChats => _onChat.stream;
 
-  final _typingCtrl = StreamController<MaxPushEvent>.broadcast();
-
-  /// Поток событий «печатает» (push 129). UI чата фильтрует по chatId.
-  Stream<MaxPushEvent> get typingEvents => _typingCtrl.stream;
-
   Future<void> start() async {
     _pushSub ??= client.incomingStream.listen(_onPush, onError: (e) {
       _log.w('push stream error: $e');
-    });
-    _eventSub ??= client.pushEvents.listen(_onEvent, onError: (e) {
-      _log.w('event stream error: $e');
     });
     // Подписываемся на состояние транспорта — при выходе в connected
     // дренируем outbox. Установка подписки не блокирует репозиторий.
@@ -71,6 +61,12 @@ class MessagesRepository {
         Future.microtask(drainOutbox);
       }
     });
+    // Восстановление входящих медиа из синка чатов (op 19): если живой push
+    // (op 128) был пропущен на обрыве, lastMessage с вложением долетит здесь.
+    _syncSub ??= client.syncedChatsStream.listen(
+      (chats) => unawaited(_ingestSyncedChats(chats)),
+      onError: (e) => _log.w('synced chats stream error: $e'),
+    );
     // Если на момент start транспорт уже connected — дренаж тоже отложенный.
     if (client.currentState == MaxConnectionState.connected) {
       Future.microtask(drainOutbox);
@@ -80,35 +76,63 @@ class MessagesRepository {
   Future<void> stop() async {
     await _pushSub?.cancel();
     _pushSub = null;
-    await _eventSub?.cancel();
-    _eventSub = null;
     await _stateSub?.cancel();
     _stateSub = null;
+    await _syncSub?.cancel();
+    _syncSub = null;
   }
 
   Future<List<MaxMessage>> localHistory(int chatId, {int limit = 200}) =>
       db.messages(chatId, limit: limit);
 
   /// Подтянуть N последних сообщений с сервера и сохранить локально.
+  /// Вызывается часто как unawaited — поэтому НЕ бросаем при отсутствии сети,
+  /// иначе ловим Unhandled Exception. На offline отдаём локальную историю.
   Future<List<MaxMessage>> syncHistory(int chatId, {int count = 50}) async {
-    return _fetchAndStore(chatId, fromId: 0, count: count, updatePreview: true);
+    try {
+      return await _fetchAndStore(
+        chatId,
+        fromId: 0,
+        count: count,
+        updatePreview: true,
+      );
+    } on MaxNotConnected catch (e) {
+      _log.i('syncHistory skipped (offline): $e');
+      return localHistory(chatId);
+    } on MaxTimeout catch (e) {
+      _log.i('syncHistory skipped (timeout): $e');
+      return localHistory(chatId);
+    }
   }
 
   /// Догрузить более старые сообщения от самого раннего локально известного id.
   /// Возвращает то, что удалось вытащить (может быть пусто, если на сервере
   /// больше ничего нет или соединение мертвое).
   Future<List<MaxMessage>> loadOlder(int chatId, {int count = 50}) async {
-    final oldest = await db.oldestServerMessageId(chatId);
-    if (oldest == null) {
-      // локально пусто — нечего пагинировать, имеет смысл только обычный sync
-      return _fetchAndStore(chatId, fromId: 0, count: count, updatePreview: true);
+    try {
+      final oldest = await db.oldestServerMessageId(chatId);
+      if (oldest == null) {
+        // локально пусто — нечего пагинировать, имеет смысл только обычный sync
+        return await _fetchAndStore(
+          chatId,
+          fromId: 0,
+          count: count,
+          updatePreview: true,
+        );
+      }
+      return await _fetchAndStore(
+        chatId,
+        fromId: oldest,
+        count: count,
+        updatePreview: false,
+      );
+    } on MaxNotConnected catch (e) {
+      _log.i('loadOlder skipped (offline): $e');
+      return localHistory(chatId);
+    } on MaxTimeout catch (e) {
+      _log.i('loadOlder skipped (timeout): $e');
+      return localHistory(chatId);
     }
-    return _fetchAndStore(
-      chatId,
-      fromId: oldest,
-      count: count,
-      updatePreview: false,
-    );
   }
 
   Future<List<MaxMessage>> _fetchAndStore(
@@ -118,19 +142,22 @@ class MessagesRepository {
     required bool updatePreview,
   }) async {
     final myId = await storage.readMyUserId();
-    final raw = await client.chatHistory(chatId, fromId: fromId, count: count);
+    // op 49 требует СЕРВЕРНЫЙ chatId. Локальная строка диалога имеет id =
+    // userId собеседника (создан из контакта), и сервер по нему отдаёт пусто —
+    // история и входящие медиа не подгружались. Резолвим в serverChatId.
+    final route = await _resolveRoute(chatId);
+    final reqChatId = route.chatId ?? chatId;
+    final raw =
+        await client.chatHistory(reqChatId, fromId: fromId, count: count);
     final out = <MaxMessage>[];
     for (final m in raw) {
       final id = (m['id'] as num?)?.toInt();
       final sender = (m['sender'] as num?)?.toInt();
-      var text = m['text']?.toString() ?? '';
+      final text = m['text']?.toString() ?? '';
       final time = (m['time'] as num?)?.toInt() ??
           DateTime.now().millisecondsSinceEpoch;
       final attRaw = (m['attaches'] ?? m['attachments']) as List?;
       final hasAttaches = attRaw != null && attRaw.isNotEmpty;
-      if (text.isEmpty && attRaw != null) {
-        text = _systemTextFromAttaches(attRaw) ?? text;
-      }
       if (text.isEmpty && !hasAttaches) continue;
       final dir = (myId != null && sender == myId)
           ? MessageDirection.outgoing
@@ -176,11 +203,6 @@ class MessagesRepository {
     for (final r in raw) {
       if (r is! Map) continue;
       final m = r.map((k, v) => MapEntry(k.toString(), v));
-      // CONTROL — системное событие чата, не медиа; в текст оно уже превращено
-      // через controlEventText, как attach не храним.
-      if ((m['_type'] ?? m['type'])?.toString().toUpperCase() == 'CONTROL') {
-        continue;
-      }
       try {
         final a = MaxAttach.fromServer(m);
         await db.insertAttach(
@@ -195,16 +217,54 @@ class MessagesRepository {
     }
   }
 
-  /// Если у сообщения нет текста, но есть CONTROL-attach (системное событие
-  /// чата) — вернуть человекочитаемый текст для показа как системное сообщение.
-  String? _systemTextFromAttaches(List<dynamic> raw) {
-    for (final r in raw) {
-      if (r is Map) {
-        final t = controlEventText(r.map((k, v) => MapEntry(k.toString(), v)));
-        if (t != null) return t;
-      }
+  /// Куда слать (op 64): server_chat_id != null → chatId; иначе peer_user_id
+  /// != null → новый диалог по userId; иначе legacy/группа → chatId = id.
+  Future<({int? chatId, int? peerUserId})> _resolveRoute(int chatId) async {
+    final c = await db.chat(chatId);
+    if (c == null) return (chatId: null, peerUserId: chatId);
+    if (c.serverChatId != null) {
+      return (chatId: c.serverChatId, peerUserId: null);
     }
+    if (c.peerUserId != null) {
+      return (chatId: null, peerUserId: c.peerUserId);
+    }
+    // Маршрут не выставлен (старая строка или чат открыт не из навигации).
+    // Если этот id есть в контактах — это диалог 1:1, слать по userId.
+    // Группы сюда не попадают: у них server_chat_id проставлен при синхронизации
+    // списка чатов, и мы вышли бы выше по ветке serverChatId.
+    final contact = await db.contact(chatId);
+    if (contact != null) {
+      return (chatId: null, peerUserId: chatId);
+    }
+    return (chatId: c.id, peerUserId: null);
+  }
+
+  int? _serverMsgId(Map<String, dynamic> res) {
+    final m = res['message'];
+    if (m is Map) return (m['id'] as num?)?.toInt();
     return null;
+  }
+
+  /// Достать серверный chatId из ответа op 64 (ключ не подтверждён — перебор
+  /// источников) и записать маршрут на ту же локальную строку, БЕЗ переноса
+  /// данных: id строки не меняется, UI/провайдеры остаются на месте.
+  Future<void> _reconcileServerChatId(
+    Map<String, dynamic> res,
+    ({int? chatId, int? peerUserId}) route,
+    int localChatId,
+  ) async {
+    if (route.peerUserId == null) return; // обычный чат — маршрут уже известен
+    int? serverChatId = (res['chatId'] as num?)?.toInt();
+    final chatObj = res['chat'];
+    if (serverChatId == null && chatObj is Map) {
+      serverChatId = (chatObj['id'] as num?)?.toInt();
+    }
+    final m = res['message'];
+    if (serverChatId == null && m is Map) {
+      serverChatId = (m['chatId'] as num?)?.toInt();
+    }
+    if (serverChatId == null) return; // ключ не пришёл — деградация, не регресс
+    await db.setServerChatId(localChatId, serverChatId);
   }
 
   Future<MaxMessage> sendText(
@@ -213,6 +273,10 @@ class MessagesRepository {
     int? replyToId,
     String? replyToPreview,
   }) async {
+    if (text.trim().isEmpty) {
+      // Пустой текст сервер отвергает (proto.payload) и рвёт соединение.
+      throw ArgumentError('Пустое сообщение');
+    }
     final myId = await storage.readMyUserId();
     final localId = _uuid.v4();
     final pending = MaxMessage(
@@ -234,33 +298,40 @@ class MessagesRepository {
     );
     _onChat.add(chatId);
 
+    final cid = DateTime.now().microsecondsSinceEpoch;
     try {
-      // TODO: ключ reply в payload sendMessage MAX неизвестен; шлём только текст.
-      final res = await client.sendMessage(chatId, text);
-      final serverId = (res['message'] is Map)
-          ? ((res['message'] as Map)['id'] as num?)?.toInt()
-          : null;
+      final route = await _resolveRoute(chatId);
+      final res = await client.sendMessage(
+        chatId: route.chatId,
+        peerUserId: route.peerUserId,
+        text: text,
+        cid: cid,
+      );
+      final serverId = _serverMsgId(res);
+      await _reconcileServerChatId(res, route, chatId);
       await db.updateMessageByLocalId(
         localId,
         serverId: serverId,
         status: MessageStatus.sent,
+        cid: cid,
       );
       _onChat.add(chatId);
       return pending.copyWith(id: serverId, status: MessageStatus.sent);
     } on MaxNotConnected catch (e) {
       _log.i('sendText offline, queued: $e');
+      await db.updateMessageByLocalId(localId, cid: cid);
       await db.enqueueOutbox(localId: localId, chatId: chatId, text: text);
       _onChat.add(chatId);
       return pending;
     } on MaxTimeout catch (e) {
       _log.i('sendText timeout, queued: $e');
+      await db.updateMessageByLocalId(localId, cid: cid);
       await db.enqueueOutbox(localId: localId, chatId: chatId, text: text);
       _onChat.add(chatId);
       return pending;
     } on MaxRejected catch (e) {
-      // Перманентный отказ (user.not.found / невалидный payload) → rejected,
-      // НЕ повторяем; транзиентный → failed, повтор руками. В outbox НЕ кладём —
-      // иначе вечный долбёж сервера = бан-сигнал (правило 6).
+      // permanent (user.not.found и т.п.) → rejected, не повторяем;
+      // транзиентный (throttle/flood) → failed, можно повторить руками.
       _log.w('sendText rejected: $e');
       final st = e.isPermanent ? MessageStatus.rejected : MessageStatus.failed;
       await db.updateMessageByLocalId(localId, status: st);
@@ -366,20 +437,24 @@ class MessagesRepository {
     // Все файлы загружены — собираем payload и шлём sendMessage.
     final attachesPayload =
         uploaded.map((a) => a.toServerPayload()).toList(growable: false);
+    final cid = DateTime.now().microsecondsSinceEpoch;
     try {
+      final route = await _resolveRoute(chatId);
       final res = await client.sendMessage(
-        chatId,
-        text,
+        chatId: route.chatId,
+        peerUserId: route.peerUserId,
+        text: text,
         attaches: attachesPayload,
         replyToId: replyToId,
+        cid: cid,
       );
-      final serverId = (res['message'] is Map)
-          ? ((res['message'] as Map)['id'] as num?)?.toInt()
-          : null;
+      final serverId = _serverMsgId(res);
+      await _reconcileServerChatId(res, route, chatId);
       await db.updateMessageByLocalId(
         localId,
         serverId: serverId,
         status: MessageStatus.sent,
+        cid: cid,
       );
       if (serverId != null) {
         await db.linkAttachesToServerId(localId, serverId);
@@ -396,17 +471,26 @@ class MessagesRepository {
         attaches: uploaded,
       );
     } on MaxNotConnected catch (e) {
-      _log.i('sendMedia offline after upload, marking failed: $e');
-      await db.updateMessageByLocalId(localId, status: MessageStatus.failed);
+      // Файл УЖЕ залит (token в attachments). Не теряем его — кладём в очередь,
+      // op 64 до-отправится на reconnect с тем же токеном, без повторной заливки.
+      _log.i('sendMedia offline after upload, queued for retry: $e');
+      await db.enqueueOutbox(localId: localId, chatId: chatId, text: text);
+      await db.updateMessageByLocalId(localId, status: MessageStatus.pending);
       _onChat.add(chatId);
-      return pending.copyWith(status: MessageStatus.failed, attaches: uploaded);
+      return pending.copyWith(
+        status: MessageStatus.pending,
+        attaches: uploaded,
+      );
     } on MaxTimeout catch (e) {
-      _log.i('sendMedia timeout after upload: $e');
-      await db.updateMessageByLocalId(localId, status: MessageStatus.failed);
+      _log.i('sendMedia timeout after upload, queued for retry: $e');
+      await db.enqueueOutbox(localId: localId, chatId: chatId, text: text);
+      await db.updateMessageByLocalId(localId, status: MessageStatus.pending);
       _onChat.add(chatId);
-      return pending.copyWith(status: MessageStatus.failed, attaches: uploaded);
+      return pending.copyWith(
+        status: MessageStatus.pending,
+        attaches: uploaded,
+      );
     } on MaxRejected catch (e) {
-      // Перманентный отказ медиа → rejected (не ретраибельно); транзиент → failed.
       _log.w('sendMedia rejected: $e');
       final st = e.isPermanent ? MessageStatus.rejected : MessageStatus.failed;
       await db.updateMessageByLocalId(localId, status: st);
@@ -579,16 +663,48 @@ class MessagesRepository {
         final chatId = (row['chat_id'] as num).toInt();
         final text = row['text'] as String;
         final attempts = (row['attempts'] as num?)?.toInt() ?? 0;
+        // Уже залитые вложения сообщения (token в attachments, привязка по
+        // message_local_id) — подкладываем в op 64 БЕЗ повторной заливки.
+        // Это и делает фото-отправку устойчивой к обрыву после upload.
+        final localAttaches = await db.attachesForLocal(localId);
+        final attachesPayload = localAttaches
+            .where((a) =>
+                a.status == MaxAttachStatus.uploaded && a.token != null)
+            .map((a) => a.toServerPayload())
+            .toList(growable: false);
+        // Дропаем, только если НЕТ ни текста, ни вложений (пустой payload сервер
+        // отвергает и РВЁТ коннект). Фото с пустой подписью — валидно.
+        if (text.trim().isEmpty && attachesPayload.isEmpty) {
+          _log.w('drainOutbox: дроп пустого сообщения $localId');
+          await db.updateMessageByLocalId(
+            localId,
+            status: MessageStatus.rejected,
+          );
+          await db.removeOutbox(localId);
+          _onChat.add(chatId);
+          continue;
+        }
+        final cid = DateTime.now().microsecondsSinceEpoch;
         try {
-          final res = await client.sendMessage(chatId, text);
-          final serverId = (res['message'] is Map)
-              ? ((res['message'] as Map)['id'] as num?)?.toInt()
-              : null;
+          final route = await _resolveRoute(chatId);
+          final res = await client.sendMessage(
+            chatId: route.chatId,
+            peerUserId: route.peerUserId,
+            text: text,
+            attaches: attachesPayload.isEmpty ? null : attachesPayload,
+            cid: cid,
+          );
+          final serverId = _serverMsgId(res);
+          await _reconcileServerChatId(res, route, chatId);
           await db.updateMessageByLocalId(
             localId,
             serverId: serverId,
             status: MessageStatus.sent,
+            cid: cid,
           );
+          if (serverId != null) {
+            await db.linkAttachesToServerId(localId, serverId);
+          }
           await db.removeOutbox(localId);
           _onChat.add(chatId);
         } on MaxNotConnected catch (e) {
@@ -601,8 +717,8 @@ class MessagesRepository {
           return;
         } on MaxRejected catch (e) {
           if (e.isPermanent) {
-            // НЕвосстановимо: дроп из очереди (НЕ реконнект-петля), статус
-            // rejected, дренаж продолжается. Это убирает вечный долбёж (правило 6).
+            // НЕвосстановимо (user.not.found и т.п.): дроп из очереди, статус
+            // rejected, дренаж продолжает. Это и убирает «вечный долбёж».
             _log.w('drainOutbox permanent reject, dropping: $e');
             await db.updateMessageByLocalId(
               localId,
@@ -612,7 +728,8 @@ class MessagesRepository {
             _onChat.add(chatId);
             continue;
           }
-          // Транзиент: не дропаем валидное сообщение — повтор при reconnect.
+          // Транзиентный (throttle/flood): НЕ дропаем валидное сообщение —
+          // ведём как timeout, попробуем при следующем reconnect.
           _log.i('drainOutbox transient reject, will retry: $e');
           await db.incOutboxAttempts(localId);
           return;
@@ -627,7 +744,7 @@ class MessagesRepository {
             await db.removeOutbox(localId);
             _onChat.add(chatId);
           }
-          // Останавливаемся, не дергаем следующее — попробуем при следующем reconnect.
+          // Останавливаемся — попробуем при следующем reconnect.
           return;
         }
       }
@@ -729,67 +846,66 @@ class MessagesRepository {
     }
   }
 
-  /// Поставить реакцию-эмодзи (op 178). Оптимистично помечаем свою реакцию;
-  /// точные счётчики придут push'ом 155/156.
-  Future<void> react(int chatId, int messageId, String emoji) async {
-    await client.setReaction(chatId, messageId, emoji);
-    await db.setMessageReactions(messageId, yourReaction: emoji);
-    _onChat.add(chatId);
-  }
-
-  /// Снять свою реакцию (op 179).
-  Future<void> cancelReact(int chatId, int messageId) async {
-    await client.cancelReaction(chatId, messageId);
-    await db.setMessageReactions(messageId, yourReaction: '');
-    _onChat.add(chatId);
-  }
-
-  /// Обработка типизированных push-событий (op 130/142/155/293). БД мутируем
-  /// только на явном удалении по серверному id; read/reactions/transcription
-  /// прокинуты на будущее (схемы payload не подтверждены — без догадок).
-  Future<void> _onEvent(MaxPushEvent ev) async {
-    final chatId = ev.chatId;
-    if (chatId == null) return;
-    switch (ev.kind) {
-      case MaxPushKind.deleted:
-        var changed = false;
-        for (final id in ev.messageIds) {
-          final n = await db.deleteMessageByServerId(id);
-          if (n > 0) changed = true;
-        }
-        if (changed) _onChat.add(chatId);
-        break;
-      case MaxPushKind.reactions:
-        final mid = ev.messageId;
-        if (mid != null) {
-          await db.setMessageReactions(mid, counts: ev.reactionCounts);
-          _onChat.add(chatId);
-        }
-        break;
-      case MaxPushKind.youReacted:
-        final mid = ev.messageId;
-        if (mid != null) {
-          await db.setMessageReactions(
-            mid,
-            counts: ev.reactionCounts,
-            yourReaction: ev.yourReaction ?? '',
-          );
-          _onChat.add(chatId);
-        }
-        break;
-      case MaxPushKind.transcription:
-        final media = ev.mediaId;
-        final text = ev.transcription;
-        if (media != null && text != null && text.isNotEmpty) {
-          await db.setAttachTranscriptionByFileId(media, text);
-          _onChat.add(chatId);
-        }
-        break;
-      case MaxPushKind.typing:
-        if (!_typingCtrl.isClosed) _typingCtrl.add(ev);
-        break;
-      case MaxPushKind.read:
-        break;
+  /// Из синка чатов (op 19) сохраняем ВХОДЯЩИЕ сообщения с вложениями, если их
+  /// ещё нет локально. Это страховка приёма медиа: op 49 (история) вложения не
+  /// отдаёт, а живой op 128 теряется на обрыве — а тут lastMessage с фото
+  /// долетает на каждом reconnect. Дедуп — по серверному id сообщения.
+  Future<void> _ingestSyncedChats(List<dynamic> chats) async {
+    final myId = await storage.readMyUserId();
+    for (final raw in chats) {
+      if (raw is! Map) continue;
+      final cm = raw.map((k, v) => MapEntry(k.toString(), v));
+      final serverChatId = (cm['id'] as num?)?.toInt();
+      final lm = cm['lastMessage'];
+      if (serverChatId == null || lm is! Map) continue;
+      final m = lm.map((k, v) => MapEntry(k.toString(), v));
+      final msgId = (m['id'] as num?)?.toInt();
+      if (msgId == null) continue;
+      final attRaw = (m['attaches'] ?? m['attachments']) as List?;
+      // Только НАСТОЯЩЕЕ медиа (фото/видео/аудио/файл). Системные вложения
+      // (_type: CONTROL — приветствие «Избранного», сервисные события) НЕ тянем,
+      // иначе в списке всплывают служебные чаты вроде «welcome.saved.dialog».
+      final media = (attRaw ?? const []).where((a) {
+        if (a is! Map) return false;
+        final t = (a['_type'] ?? a['type'])?.toString().toUpperCase();
+        return t == 'PHOTO' ||
+            t == 'VIDEO' ||
+            t == 'AUDIO' ||
+            t == 'VIDEO_MSG' ||
+            t == 'FILE' ||
+            t == 'STICKER';
+      }).toList();
+      if (media.isEmpty) continue;
+      if (await db.isProcessed(msgId)) continue; // уже есть (push/прошлый синк)
+      await db.markProcessed(msgId);
+      final sender = (m['sender'] as num?)?.toInt();
+      // Своё отправленное эхо пропускаем — оно линкуется по cid отдельно.
+      if (myId != null && sender == myId) continue;
+      final localChatId = await db.localChatIdForServer(serverChatId);
+      final text = m['text']?.toString() ?? '';
+      final time = (m['time'] as num?)?.toInt() ??
+          DateTime.now().millisecondsSinceEpoch;
+      await db.insertMessage(MaxMessage(
+        id: msgId,
+        chatId: localChatId,
+        senderId: sender,
+        text: text,
+        timeMs: time,
+        direction: MessageDirection.incoming,
+      ));
+      await _persistAttaches(
+        media,
+        chatId: localChatId,
+        messageServerId: msgId,
+      );
+      await db.updateChatPreview(
+        chatId: localChatId,
+        timeMs: time,
+        preview: text.isNotEmpty ? text : '[Вложение]',
+        incUnread: 1,
+      );
+      _onChat.add(localChatId);
+      _log.i('синк: восстановлено входящее медиа msg=$msgId chat=$localChatId');
     }
   }
 
@@ -801,15 +917,28 @@ class MessagesRepository {
     final dir = (myId != null && m.sender == myId)
         ? MessageDirection.outgoing
         : MessageDirection.incoming;
-    var text = m.text;
-    if (text.isEmpty) {
-      text = _systemTextFromAttaches(m.attaches) ?? text;
+
+    // Входящий несёт СЕРВЕРНЫЙ chatId; пишем под локальной строкой диалога,
+    // если она известна (диалог открывали из контакта по userId).
+    final localChatId = await db.localChatIdForServer(m.chatId);
+
+    // Эхо собственного отправленного: слинковать с локальной строкой по cid,
+    // не вставляя дубль.
+    if (dir == MessageDirection.outgoing &&
+        m.cid != null &&
+        m.messageId != null) {
+      final linked = await db.linkEchoByCid(m.cid!, m.messageId!);
+      if (linked) {
+        _onChat.add(localChatId);
+        return;
+      }
     }
+
     final msg = MaxMessage(
       id: m.messageId,
-      chatId: m.chatId,
+      chatId: localChatId,
       senderId: m.sender,
-      text: text,
+      text: m.text,
       timeMs: m.timeMs ?? DateTime.now().millisecondsSinceEpoch,
       direction: dir,
     );
@@ -817,17 +946,17 @@ class MessagesRepository {
     if (m.attaches.isNotEmpty && m.messageId != null) {
       await _persistAttaches(
         m.attaches,
-        chatId: m.chatId,
+        chatId: localChatId,
         messageServerId: m.messageId,
       );
     }
     final preview = msg.text.isNotEmpty ? msg.text : '[Вложение]';
     await db.updateChatPreview(
-      chatId: m.chatId,
+      chatId: localChatId,
       timeMs: msg.timeMs,
       preview: preview,
       incUnread: dir == MessageDirection.incoming ? 1 : 0,
     );
-    _onChat.add(m.chatId);
+    _onChat.add(localChatId);
   }
 }

@@ -19,31 +19,20 @@ import '../../core/constants.dart';
 ///
 /// Порядок ключей сохраняется: литералы Map в Dart — LinkedHashMap, msgpack
 /// сериализует в порядке вставки.
-///
-/// iOS-замечание (анти-бан правило 5): на iPhone вход по SMS идёт как
-/// deviceType=ANDROID, pushDeviceType=GCM — НЕ IOS/APNS. Проверено по рабочему
-/// форку: ни IOS, ни APNS, ни device_info_plus iosInfo там нет; appVersion
-/// 26.15.0 / build 6689 — это версия Android-приложения MAX, валидного
-/// iOS-userAgent из них не собрать. Менять deviceType на IOS = регрессия
-/// (IOS-флоу сервера не реверснут, риск бана). На iOS отдаём ANDROID-userAgent
-/// с согласованным пресетом реального Android-телефона (ниже), а не заглушкой.
 class DeviceProfile {
   const DeviceProfile._();
 
   static Future<Map<String, Object?>> userAgent(String deviceType) async {
+    if (deviceType == 'IOS') {
+      return _iosUserAgent();
+    }
     if (deviceType != 'ANDROID') {
       return minimal(deviceType);
     }
 
-    // По умолчанию — согласованный пресет реального Android-устройства
-    // (модель/SDK/arch/экран из одного телефона). Нужен на iOS/desktop/CLI,
-    // где Android-канала нет: раньше там userAgent отдавал deviceName="Android"
-    // + чужое разрешение экрана (на iPhone — iOS-овское), чего у живых
-    // Android-телефонов не бывает. Это дешёвый бан-сигнал, пресет его убирает.
-    var arch = _fbArch;
-    var osVersion = _fbSdk;
-    var deviceName = _fbName;
-    var screen = _fbScreen;
+    var arch = 'arm64-v8a';
+    var osVersion = '34';
+    var deviceName = 'Android';
     try {
       final info = await DeviceInfoPlugin().androidInfo;
       if (info.supportedAbis.isNotEmpty) {
@@ -54,17 +43,18 @@ class DeviceProfile {
       final model = info.model.trim();
       final name = man.isEmpty ? model : '$man $model';
       if (name.trim().isNotEmpty) deviceName = name.trim();
+    } catch (_) {
+      // Нет нативного канала (desktop/CLI/тест) — остаются дефолты.
+    }
 
-      // Реальный экран берём только на настоящем Android — там модель и
-      // разрешение из одного устройства. На пресет-пути (iOS) экран уже
-      // согласован с моделью, чужое разрешение туда тащить нельзя.
-      final size = ui.PlatformDispatcher.instance.implicitView?.physicalSize;
+    var screen = '1080x2340';
+    try {
+      final view = ui.PlatformDispatcher.instance.implicitView;
+      final size = view?.physicalSize;
       if (size != null && size.width > 0 && size.height > 0) {
         screen = '${size.width.round()}x${size.height.round()}';
       }
-    } catch (_) {
-      // Нет нативного Android-канала — остаётся согласованный пресет.
-    }
+    } catch (_) {}
 
     // Порядок строго как у официального клиента (pushDeviceType — 2-й).
     return {
@@ -82,14 +72,46 @@ class DeviceProfile {
     };
   }
 
-  // Согласованный пресет: Samsung Galaxy A54 5G (SM-A546E), Android 14.
-  // Недорогой и массовый в РФ телефон — userAgent сливается с толпой реальных
-  // устройств, а не торчит дефолтной заглушкой "Android"/sdk34. Все 4 поля из
-  // одного устройства, поэтому модель и разрешение не противоречат друг другу.
-  static const _fbName = 'samsung SM-A546E';
-  static const _fbSdk = '34';
-  static const _fbArch = 'arm64-v8a';
-  static const _fbScreen = '1080x2340';
+  /// Полный userAgent для iOS-сборки (deviceType=IOS). Тот же набор полей и
+  /// порядок, что у ANDROID, но pushDeviceType=APNS и реальные поля iPhone.
+  /// Имя устройства берём как модель (iPhone15,2), НЕ пользовательское имя
+  /// (то — PII). ВНИМАНИЕ: appVersion/buildNumber здесь пока от Android-сборки;
+  /// для полной маскировки подставь версию ОФИЦИАЛЬНОГО iOS-приложения MAX.
+  static Future<Map<String, Object?>> _iosUserAgent() async {
+    var osVersion = '17.0';
+    var deviceName = 'iPhone';
+    try {
+      final info = await DeviceInfoPlugin().iosInfo;
+      if (info.systemVersion.isNotEmpty) osVersion = info.systemVersion;
+      final model = info.utsname.machine.trim();
+      deviceName = model.isNotEmpty ? model : info.model;
+    } catch (_) {
+      // Нет нативного канала (не iOS/тест) — дефолты.
+    }
+
+    var screen = '1170x2532';
+    try {
+      final view = ui.PlatformDispatcher.instance.implicitView;
+      final size = view?.physicalSize;
+      if (size != null && size.width > 0 && size.height > 0) {
+        screen = '${size.width.round()}x${size.height.round()}';
+      }
+    } catch (_) {}
+
+    return {
+      'deviceType': 'IOS',
+      'pushDeviceType': 'APNS',
+      'appVersion': MaxProto.appVersion,
+      'arch': 'arm64',
+      'buildNumber': MaxProto.appBuild,
+      'osVersion': osVersion,
+      'locale': MaxProto.locale,
+      'deviceLocale': MaxProto.deviceLocale,
+      'deviceName': deviceName,
+      'screen': screen,
+      'timezone': _ianaTimezone(),
+    };
+  }
 
   /// Проверенный рабочим python-клиентом минимум — для WEB и fallback.
   static Map<String, Object?> minimal(String deviceType) => {

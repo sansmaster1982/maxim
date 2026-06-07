@@ -385,6 +385,13 @@ class MaxClient {
   List<dynamic>? _lastSyncedChats;
   List<dynamic>? get lastSyncedChats => _lastSyncedChats;
 
+  /// id профиля из ответа LOGIN (op19 profile.contact.id) — это «я». Нужен,
+  /// пока storage.myUserId ещё не записан (профиль грузится асинхронно после
+  /// логина): иначе при разборе диалога себя не исключить из participants и
+  /// именем чата становится собственное имя.
+  int? _myProfileId;
+  int? get myProfileId => _myProfileId;
+
   Future<Uint8List> login(String token) async {
     final f = await _request(MaxOp.login, {
       'token': token,
@@ -406,6 +413,14 @@ class MaxClient {
     _reconnect.rearm();
     final dec = f.decoded;
     if (dec is Map) {
+      final prof = dec['profile'];
+      if (prof is Map) {
+        final contact = prof['contact'];
+        if (contact is Map) {
+          final pid = (contact['id'] as num?)?.toInt();
+          if (pid != null) _myProfileId = pid;
+        }
+      }
       final chats = dec['chats'];
       if (chats is List && chats.isNotEmpty) {
         _lastSyncedChats = chats; // кеш на случай гонки с подпиской

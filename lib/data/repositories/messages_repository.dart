@@ -924,11 +924,10 @@ class MessagesRepository {
       }
       await db.upsertChat(row);
       count++;
-      // Имя диалога ещё не резолвлено → в очередь на op32.
-      final noName = row.title == null ||
-          row.title!.isEmpty ||
-          row.title == 'Чат ${row.id}';
-      if (peer != null && noName) dialogPeers[id] = peer;
+      // Имя диалога всегда резолвим из профиля собеседника (op32): один запрос
+      // на синк, дёшево, и само-исцеляет неверные старые названия (напр. чаты,
+      // ошибочно названные своим именем до фикса myProfileId).
+      if (peer != null) dialogPeers[id] = peer;
     }
     _log.i('DIAG ingestChatList: $count чатов, к резолву имён '
         '${dialogPeers.length}');

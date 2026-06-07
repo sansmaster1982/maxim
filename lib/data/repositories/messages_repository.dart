@@ -257,6 +257,15 @@ class MessagesRepository {
       await db.enqueueOutbox(localId: localId, chatId: chatId, text: text);
       _onChat.add(chatId);
       return pending;
+    } on MaxRejected catch (e) {
+      // Перманентный отказ (user.not.found / невалидный payload) → rejected,
+      // НЕ повторяем; транзиентный → failed, повтор руками. В outbox НЕ кладём —
+      // иначе вечный долбёж сервера = бан-сигнал (правило 6).
+      _log.w('sendText rejected: $e');
+      final st = e.isPermanent ? MessageStatus.rejected : MessageStatus.failed;
+      await db.updateMessageByLocalId(localId, status: st);
+      _onChat.add(chatId);
+      return pending.copyWith(status: st);
     } catch (e) {
       _log.w('sendText failed: $e');
       await db.updateMessageByLocalId(localId, status: MessageStatus.failed);
@@ -396,6 +405,13 @@ class MessagesRepository {
       await db.updateMessageByLocalId(localId, status: MessageStatus.failed);
       _onChat.add(chatId);
       return pending.copyWith(status: MessageStatus.failed, attaches: uploaded);
+    } on MaxRejected catch (e) {
+      // Перманентный отказ медиа → rejected (не ретраибельно); транзиент → failed.
+      _log.w('sendMedia rejected: $e');
+      final st = e.isPermanent ? MessageStatus.rejected : MessageStatus.failed;
+      await db.updateMessageByLocalId(localId, status: st);
+      _onChat.add(chatId);
+      return pending.copyWith(status: st, attaches: uploaded);
     } catch (e) {
       _log.w('sendMedia sendMessage failed: $e');
       await db.updateMessageByLocalId(localId, status: MessageStatus.failed);
@@ -581,6 +597,23 @@ class MessagesRepository {
           return;
         } on MaxTimeout catch (e) {
           _log.i('drainOutbox stopped, timeout: $e');
+          await db.incOutboxAttempts(localId);
+          return;
+        } on MaxRejected catch (e) {
+          if (e.isPermanent) {
+            // НЕвосстановимо: дроп из очереди (НЕ реконнект-петля), статус
+            // rejected, дренаж продолжается. Это убирает вечный долбёж (правило 6).
+            _log.w('drainOutbox permanent reject, dropping: $e');
+            await db.updateMessageByLocalId(
+              localId,
+              status: MessageStatus.rejected,
+            );
+            await db.removeOutbox(localId);
+            _onChat.add(chatId);
+            continue;
+          }
+          // Транзиент: не дропаем валидное сообщение — повтор при reconnect.
+          _log.i('drainOutbox transient reject, will retry: $e');
           await db.incOutboxAttempts(localId);
           return;
         } catch (e) {

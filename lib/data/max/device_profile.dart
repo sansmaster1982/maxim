@@ -19,6 +19,14 @@ import '../../core/constants.dart';
 ///
 /// Порядок ключей сохраняется: литералы Map в Dart — LinkedHashMap, msgpack
 /// сериализует в порядке вставки.
+///
+/// iOS-замечание (анти-бан правило 5): на iPhone вход по SMS идёт как
+/// deviceType=ANDROID, pushDeviceType=GCM — НЕ IOS/APNS. Проверено по рабочему
+/// форку: ни IOS, ни APNS, ни device_info_plus iosInfo там нет; appVersion
+/// 26.15.0 / build 6689 — это версия Android-приложения MAX, валидного
+/// iOS-userAgent из них не собрать. Менять deviceType на IOS = регрессия
+/// (IOS-флоу сервера не реверснут, риск бана). На iOS отдаём ANDROID-userAgent
+/// с согласованным пресетом реального Android-телефона (ниже), а не заглушкой.
 class DeviceProfile {
   const DeviceProfile._();
 

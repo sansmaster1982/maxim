@@ -21,7 +21,7 @@ class AppDatabase {
     final path = p.join(dir.path, AppMeta.dbName);
     final db = await openDatabase(
       path,
-      version: 7,
+      version: 8,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -34,6 +34,26 @@ class AppDatabase {
     int oldVersion,
     int newVersion,
   ) async {
+    // КРИТИЧНО: старый форк max iso и master оба дошли до version 7, но с
+    // РАЗНЫМИ схемами (max iso: messages.reactions/your_reaction, БЕЗ cid;
+    // chats БЕЗ peer_user_id/server_chat_id. master — наоборот). Один номер
+    // версии → sqflite не мигрирует, и записи master падают на отсутствующих
+    // колонках (вставка сообщения/обновление чата молча кидают исключение —
+    // отправка не работает, имена не строятся). На v8 пересоздаём БД по схеме
+    // master. Данные не теряются по сути — чаты/история тянутся с сервера.
+    if (oldVersion < 8) {
+      final tables = await db.query(
+        'sqlite_master',
+        columns: ['name'],
+        where: "type = 'table' AND name NOT LIKE 'sqlite_%' "
+            "AND name NOT LIKE 'android_%'",
+      );
+      for (final t in tables) {
+        await db.execute('DROP TABLE IF EXISTS ${t['name']}');
+      }
+      await _onCreate(db, newVersion);
+      return;
+    }
     if (oldVersion < 2) {
       await db.execute(
         'ALTER TABLE messages ADD COLUMN reply_to_id INTEGER',

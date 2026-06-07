@@ -1,5 +1,7 @@
 # maxim — клиент мессенджера MAX на Flutter
 
+[![TestFlight](https://img.shields.io/badge/TestFlight-установить%20на%20iPhone-0D96F6?style=for-the-badge&logo=apple&logoColor=white)](https://testflight.apple.com/join/CFEaJe8h)
+
 [![Donate Bitcoin](https://img.shields.io/badge/донат-Bitcoin-f7931a?style=for-the-badge&logo=bitcoin&logoColor=white)](#поддержать-проект)
 [![Donate Ethereum](https://img.shields.io/badge/донат-Ethereum-627eea?style=for-the-badge&logo=ethereum&logoColor=white)](#поддержать-проект)
 [![Donate USDT TRC20](https://img.shields.io/badge/донат-USDT%20TRC--20-26a17b?style=for-the-badge&logo=tether&logoColor=white)](#поддержать-проект)
@@ -9,6 +11,10 @@
 Сторонний клиент мессенджера MAX (`api.oneme.ru`), целевая платформа iOS, кодовая база на Flutter (запускается также на Android и Windows-desktop для разработки). Говорит с боевой сетью MAX по родному бинарному протоколу — 10-байтный кадр + msgpack + распаковка тела (LZ4). Трафик неотличим от официального клиента, поэтому идёт там же, где MAX не режется оператором.
 
 Протокол восстановлен из наработок: Python-клиент `telega-to-max`, пакет `maxclient` (реверс десктопного MAX) и декомпил APK. Сводная спецификация — [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+## Установка на iPhone
+
+Бета раздаётся через TestFlight: **[testflight.apple.com/join/CFEaJe8h](https://testflight.apple.com/join/CFEaJe8h)**. Поставь приложение TestFlight из App Store, открой ссылку, нажми Install — Mac не нужен. Сборка из исходников — в разделе [«Сборка и запуск»](#сборка-и-запуск).
 
 ## Безопасность и приватность
 

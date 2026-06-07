@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../data/max/models/chat.dart';
-import '../../data/max/models/message.dart';
 import '../../state/chats_controller.dart';
 import '../theme/app_theme.dart';
 import '../widgets/connection_banner.dart';
@@ -62,65 +61,26 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
               loading: () => const Center(child: CircularProgressIndicator()),
               error: (e, _) => Center(child: Text('Ошибка: $e')),
               data: (chats) {
-                if (_query.isEmpty) {
-                  if (chats.isEmpty) return const _EmptyState(query: '');
-                  return RefreshIndicator(
-                    onRefresh: () =>
-                        ref.read(chatsListProvider.notifier).refresh(),
-                    child: ListView.separated(
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      itemCount: chats.length,
-                      separatorBuilder: (_, __) =>
-                          const Divider(height: 0, indent: 76),
-                      itemBuilder: (_, i) => _ChatTile(chat: chats[i]),
-                    ),
-                  );
-                }
-                // Режим поиска: совпадения по названиям чатов + по тексту
-                // сообщений (messageSearchProvider, поиск в БД).
-                final chatHits = chats.where((c) {
-                  final t = (c.title ?? '').toLowerCase();
-                  final p = (c.lastMessagePreview ?? '').toLowerCase();
-                  return t.contains(_query) || p.contains(_query);
-                }).toList();
-                final msgHits =
-                    ref.watch(messageSearchProvider(_query)).valueOrNull ??
-                        const <MaxMessage>[];
-                if (chatHits.isEmpty && msgHits.isEmpty) {
+                final visible = _query.isEmpty
+                    ? chats
+                    : chats.where((c) {
+                        final t = (c.title ?? '').toLowerCase();
+                        final p = (c.lastMessagePreview ?? '').toLowerCase();
+                        return t.contains(_query) || p.contains(_query);
+                      }).toList();
+                if (visible.isEmpty) {
                   return _EmptyState(query: _query);
                 }
-                final byId = {for (final c in chats) c.id: c};
-                String titleFor(int id) => byId[id]?.title ?? 'Чат $id';
-                return ListView(
-                  children: [
-                    if (chatHits.isNotEmpty) const _SectionHeader('Чаты'),
-                    for (final c in chatHits) _ChatTile(chat: c),
-                    if (msgHits.isNotEmpty) const _SectionHeader('Сообщения'),
-                    for (final m in msgHits)
-                      ListTile(
-                        leading: const CircleAvatar(
-                          child: Icon(Icons.message_outlined),
-                        ),
-                        title: Text(
-                          titleFor(m.chatId),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        subtitle: Text(
-                          m.text,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => ChatScreen(
-                              chatId: m.chatId,
-                              title: titleFor(m.chatId),
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
+                return RefreshIndicator(
+                  onRefresh: () =>
+                      ref.read(chatsListProvider.notifier).refresh(),
+                  child: ListView.separated(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    itemCount: visible.length,
+                    separatorBuilder: (_, __) =>
+                        const Divider(height: 0, indent: 76),
+                    itemBuilder: (_, i) => _ChatTile(chat: visible[i]),
+                  ),
                 );
               },
             ),
@@ -171,27 +131,6 @@ class _EmptyState extends StatelessWidget {
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader(this.label);
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
-      child: Text(
-        label.toUpperCase(),
-        style: TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.5,
-          color: Theme.of(context).colorScheme.primary,
         ),
       ),
     );

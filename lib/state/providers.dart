@@ -10,15 +10,13 @@ import '../data/repositories/chats_repository.dart';
 import '../data/repositories/contacts_repository.dart';
 import '../data/repositories/media_repository.dart';
 import '../data/repositories/messages_repository.dart';
-import '../data/repositories/sync_repository.dart';
 import '../data/repositories/upload_repository.dart';
 
 /// Диагностика на устройстве: при true логи идут И в release-сборке (видны в
-/// idevicesyslog на подключённом iPhone — нужно, чтобы разбирать reconnect/
-/// keepalive/ошибки без Mac). По умолчанию logger-пакет (DevelopmentFilter)
-/// в release молчит. SimplePrinter — однострочный, грепится в syslog
-/// (ищи reconnect|keepalive|LOGIN|rejected). Для прод-релиза в App Store
-/// выставить false.
+/// idevicesyslog на iPhone — нужно для разбора reconnect/keepalive/ошибок без
+/// Mac). По умолчанию logger-пакет (DevelopmentFilter) в release молчит.
+/// SimplePrinter — однострочный, грепится (reconnect|keepalive|LOGIN|rejected).
+/// Для прод-релиза в App Store выставить false.
 const bool kDeviceDiagnostics = true;
 
 final loggerProvider = Provider<Logger>((ref) {
@@ -86,18 +84,6 @@ final messagesRepositoryProvider = FutureProvider<MessagesRepository>((ref) asyn
   await repo.start();
   ref.onDispose(repo.stop);
   return repo;
-});
-
-final syncRepositoryProvider = FutureProvider<SyncRepository>((ref) async {
-  final db = await ref.watch(appDatabaseProvider.future);
-  final chats = await ref.watch(chatsRepositoryProvider.future);
-  return SyncRepository(
-    client: ref.watch(maxClientProvider),
-    db: db,
-    storage: ref.watch(secureStorageProvider),
-    chats: chats,
-    logger: ref.watch(loggerProvider),
-  );
 });
 
 final chatsRepositoryProvider = FutureProvider<ChatsRepository>((ref) async {

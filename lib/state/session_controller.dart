@@ -1,7 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/repositories/auth_repository.dart';
-import 'chats_controller.dart';
 import 'providers.dart';
 
 enum SessionStatus { loading, signedOut, signedIn }
@@ -52,7 +51,6 @@ class SessionController extends Notifier<SessionState> {
       );
     };
     final ok = await repo.tryRestoreSession();
-    if (ok) await _syncAfterLogin();
     state = SessionState(
       status: ok ? SessionStatus.signedIn : SessionStatus.signedOut,
     );
@@ -78,7 +76,6 @@ class SessionController extends Notifier<SessionState> {
     try {
       final next = await repo.submitSmsCode(code);
       if (next == AuthState.authenticated) {
-        await _syncAfterLogin();
         state = SessionState(status: SessionStatus.signedIn);
       } else {
         state = state.copyWith(authFlow: AuthState.awaiting2fa);
@@ -106,24 +103,11 @@ class SessionController extends Notifier<SessionState> {
     return idx >= 0 ? s.substring(idx + 2) : s;
   }
 
-  /// Наполняет локальную БД снэпшотом логина (профиль/чаты/контакты) и
-  /// обновляет список чатов. Ошибка синхронизации не срывает вход.
-  Future<void> _syncAfterLogin() async {
-    try {
-      final sync = await ref.read(syncRepositoryProvider.future);
-      await sync.applyLoginSnapshot();
-      ref.invalidate(chatsListProvider);
-    } catch (e) {
-      ref.read(loggerProvider).w('post-login sync failed: $e');
-    }
-  }
-
   Future<void> submit2fa(String password) async {
     final repo = ref.read(authRepositoryProvider);
     state = state.copyWith(error: null);
     try {
       await repo.submit2fa(password);
-      await _syncAfterLogin();
       state = const SessionState(status: SessionStatus.signedIn);
     } catch (e) {
       state = state.copyWith(error: _humanError(e));
@@ -141,7 +125,6 @@ class SessionController extends Notifier<SessionState> {
     }
     try {
       await repo.loginWithToken(t);
-      await _syncAfterLogin();
       state = const SessionState(status: SessionStatus.signedIn);
     } catch (e) {
       state = state.copyWith(error: _humanError(e));

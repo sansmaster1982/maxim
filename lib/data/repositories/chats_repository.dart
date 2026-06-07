@@ -8,7 +8,26 @@ class ChatsRepository {
   final MaxClient client;
   final AppDatabase db;
 
-  Future<List<MaxChat>> listLocal() => db.chats();
+  Future<List<MaxChat>> listLocal() async {
+    final chats = await db.chats();
+    // Для диалогов с плейсхолдерным именем («Чат N») или пустым подставляем
+    // имя контакта — иначе в списке чат называется числом.
+    final out = <MaxChat>[];
+    for (final c in chats) {
+      final isPlaceholder =
+          c.title == null || c.title!.isEmpty || c.title == 'Чат ${c.id}';
+      if (isPlaceholder) {
+        final contact = await db.contact(c.id);
+        final name = contact?.name;
+        if (name != null && name.isNotEmpty) {
+          out.add(c.copyWith(title: name));
+          continue;
+        }
+      }
+      out.add(c);
+    }
+    return out;
+  }
 
   Future<MaxChat?> get(int id) => db.chat(id);
 
@@ -26,17 +45,35 @@ class ChatsRepository {
           title: c.title ?? existing.title,
           avatarUrl: c.avatarUrl ?? existing.avatarUrl,
           isGroup: c.isGroup,
+          serverChatId: c.serverChatId ?? existing.serverChatId,
         ));
       }
     }
   }
 
-  Future<void> ensureExists(int chatId, {String? title}) async {
+  /// [peerUserId] != null ⇒ это диалог 1:1 (открыт из контакта). Тип приходит
+  /// явно из навигации, без эвристики «id ∈ contacts» (она ломала бы группы).
+  Future<void> ensureExists(int chatId, {String? title, int? peerUserId}) async {
     final existing = await db.chat(chatId);
     if (existing == null) {
-      await db.upsertChat(MaxChat(id: chatId, title: title ?? 'Чат $chatId'));
-    } else if (title != null && (existing.title?.isEmpty ?? true)) {
-      await db.upsertChat(existing.copyWith(title: title));
+      await db.upsertChat(MaxChat(
+        id: chatId,
+        title: title ?? 'Чат $chatId',
+        peerUserId: peerUserId,
+      ));
+      return;
+    }
+    var updated = existing;
+    if (title != null && (existing.title?.isEmpty ?? true)) {
+      updated = updated.copyWith(title: title);
+    }
+    // Backfill типа для диалогов, заведённых до миграции v7 (peer_user_id
+    // IS NULL, но открыты из контакта) — лечим лениво при открытии.
+    if (peerUserId != null && existing.peerUserId == null) {
+      updated = updated.copyWith(peerUserId: peerUserId);
+    }
+    if (!identical(updated, existing)) {
+      await db.upsertChat(updated);
     }
   }
 
@@ -62,6 +99,9 @@ class ChatsRepository {
             title: mm['title']?.toString() ?? mm['name']?.toString(),
             avatarUrl: mm['avatar']?.toString() ?? mm['photo']?.toString(),
             isGroup: isGroup,
+            // Запись из серверного списка чатов — её id уже серверный,
+            // маршрут отправки = chatId (а не userId).
+            serverChatId: id.toInt(),
           );
         })
         .whereType<MaxChat>()

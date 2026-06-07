@@ -14,7 +14,7 @@ class SplashScreen extends ConsumerWidget {
     switch (session.status) {
       case SessionStatus.loading:
         return const Scaffold(
-          body: Center(child: CircularProgressIndicator.adaptive()),
+          body: Center(child: CircularProgressIndicator()),
         );
       case SessionStatus.signedOut:
         return const LoginScreen();

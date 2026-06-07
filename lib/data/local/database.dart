@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
@@ -30,12 +28,6 @@ class AppDatabase {
     _instance = AppDatabase._(db);
     return _instance!;
   }
-
-  /// Только для тестов: обернуть уже открытую БД (например in-memory ffi).
-  static AppDatabase forDb(Database db) => AppDatabase._(db);
-
-  /// Только для тестов: создать схему версии 6 в переданной БД.
-  static Future<void> createSchemaForTest(Database db) => _onCreate(db, 7);
 
   static Future<void> _onUpgrade(
     Database db,
@@ -84,8 +76,14 @@ class AppDatabase {
       );
     }
     if (oldVersion < 7) {
-      await db.execute('ALTER TABLE messages ADD COLUMN reactions TEXT');
-      await db.execute('ALTER TABLE messages ADD COLUMN your_reaction TEXT');
+      // Маршрутизация диалогов 1:1: peer_user_id = тип (диалог с userId),
+      // server_chat_id = подтверждённый серверный chatId. cid = дедуп эхо.
+      await db.execute('ALTER TABLE chats ADD COLUMN peer_user_id INTEGER');
+      await db.execute('ALTER TABLE chats ADD COLUMN server_chat_id INTEGER');
+      await db.execute('ALTER TABLE messages ADD COLUMN cid INTEGER');
+      await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_chats_server ON chats(server_chat_id)',
+      );
     }
   }
 
@@ -137,11 +135,16 @@ class AppDatabase {
         unread_count INTEGER NOT NULL DEFAULT 0,
         is_pinned INTEGER NOT NULL DEFAULT 0,
         is_archived INTEGER NOT NULL DEFAULT 0,
-        is_muted INTEGER NOT NULL DEFAULT 0
+        is_muted INTEGER NOT NULL DEFAULT 0,
+        peer_user_id INTEGER,
+        server_chat_id INTEGER
       )
     ''');
     await db.execute('''
       CREATE INDEX idx_chats_time ON chats(last_message_time_ms DESC)
+    ''');
+    await db.execute('''
+      CREATE INDEX idx_chats_server ON chats(server_chat_id)
     ''');
 
     await db.execute('''
@@ -158,8 +161,7 @@ class AppDatabase {
         reply_to_id INTEGER,
         reply_to_preview TEXT,
         edited_at INTEGER,
-        reactions TEXT,
-        your_reaction TEXT
+        cid INTEGER
       )
     ''');
     await db.execute('''
@@ -250,11 +252,43 @@ class AppDatabase {
     );
   }
 
+  /// Проставить подтверждённый серверный chatId диалогу (после op 64).
+  /// id строки НЕ меняется — UI/провайдеры остаются на месте.
+  Future<void> setServerChatId(int localChatId, int serverChatId) async {
+    await _db.update(
+      'chats',
+      {'server_chat_id': serverChatId},
+      where: 'id = ?',
+      whereArgs: [localChatId],
+    );
+  }
+
+  /// Локальная строка чата по подтверждённому серверному chatId.
+  Future<MaxChat?> chatByServerId(int serverChatId) async {
+    final rows = await _db.query(
+      'chats',
+      where: 'server_chat_id = ?',
+      whereArgs: [serverChatId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return MaxChat.fromDbRow(rows.first);
+  }
+
+  /// Локальный chatId, под которым лежит чат с данным серверным id.
+  /// Если отдельной строки-диалога нет — возвращает сам serverChatId
+  /// (обычные чаты/группы писались под своим серверным id).
+  Future<int> localChatIdForServer(int serverChatId) async {
+    final c = await chatByServerId(serverChatId);
+    return c?.id ?? serverChatId;
+  }
+
   Future<void> updateChatPreview({
     required int chatId,
     required int timeMs,
     required String preview,
     int incUnread = 0,
+    int? peerUserId,
   }) async {
     final existing = await chat(chatId);
     if (existing == null) {
@@ -264,6 +298,7 @@ class AppDatabase {
         lastMessageTimeMs: timeMs,
         lastMessagePreview: preview,
         unreadCount: incUnread,
+        peerUserId: peerUserId,
       ));
     } else {
       await upsertChat(existing.copyWith(
@@ -325,28 +360,6 @@ class AppDatabase {
     ];
   }
 
-  /// Глобальный поиск по тексту сообщений. SQLite LOWER() кириллицу не трогает,
-  /// поэтому регистронезависимость делаем в Dart (Unicode-aware toLowerCase):
-  /// берём до 2000 свежих сообщений и фильтруем по подстроке.
-  Future<List<MaxMessage>> searchMessages(String query, {int limit = 50}) async {
-    final q = query.trim().toLowerCase();
-    if (q.isEmpty) return const [];
-    final rows = await _db.query(
-      'messages',
-      orderBy: 'time_ms DESC',
-      limit: 2000,
-    );
-    final out = <MaxMessage>[];
-    for (final r in rows) {
-      final t = (r['text'] as String?) ?? '';
-      if (t.toLowerCase().contains(q)) {
-        out.add(MaxMessage.fromDbRow(r));
-        if (out.length >= limit) break;
-      }
-    }
-    return out;
-  }
-
   Future<int> insertMessage(MaxMessage m) async {
     return _db.insert(
       'messages',
@@ -382,14 +395,29 @@ class AppDatabase {
     return MaxMessage.fromDbRow(rows.first);
   }
 
+  /// Если входящий push несёт cid нашего исходящего — это эхо уже
+  /// существующей локальной строки. Проставляем серверный id вместо вставки
+  /// дубля. Возвращает true, если эхо слинковано.
+  Future<bool> linkEchoByCid(int cid, int serverId) async {
+    final n = await _db.update(
+      'messages',
+      {'id': serverId, 'status': MessageStatus.sent.name},
+      where: 'cid = ? AND id IS NULL',
+      whereArgs: [cid],
+    );
+    return n > 0;
+  }
+
   Future<void> updateMessageByLocalId(
     String localId, {
     int? serverId,
     MessageStatus? status,
+    int? cid,
   }) async {
     final values = <String, Object?>{};
     if (serverId != null) values['id'] = serverId;
     if (status != null) values['status'] = status.name;
+    if (cid != null) values['cid'] = cid;
     if (values.isEmpty) return;
     await _db.update(
       'messages',
@@ -413,40 +441,6 @@ class AppDatabase {
       },
       where: 'id = ?',
       whereArgs: [serverId],
-    );
-  }
-
-  /// Удалить сообщение по серверному id (push NOTIF_MSG_DELETE op 142).
-  /// Возвращает число удалённых строк (0 если такого сообщения локально нет).
-  Future<int> deleteMessageByServerId(int serverId) async {
-    return _db.delete('messages', where: 'id = ?', whereArgs: [serverId]);
-  }
-
-  /// Обновить реакции сообщения (push 155/156 или своя отправка). counts —
-  /// JSON {emoji:count}; yourReaction — своя реакция (пустая строка = снять).
-  Future<void> setMessageReactions(
-    int serverId, {
-    Map<String, int>? counts,
-    String? yourReaction,
-  }) async {
-    final values = <String, Object?>{};
-    if (counts != null) {
-      values['reactions'] = counts.isEmpty ? null : jsonEncode(counts);
-    }
-    if (yourReaction != null) {
-      values['your_reaction'] = yourReaction.isEmpty ? null : yourReaction;
-    }
-    if (values.isEmpty) return;
-    await _db.update('messages', values, where: 'id = ?', whereArgs: [serverId]);
-  }
-
-  /// Сохранить транскрипцию (push 293) для attach по серверному fileId/mediaId.
-  Future<void> setAttachTranscriptionByFileId(int fileId, String text) async {
-    await _db.update(
-      'attachments',
-      {'transcription': text},
-      where: 'file_id = ?',
-      whereArgs: [fileId],
     );
   }
 

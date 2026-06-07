@@ -5,7 +5,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/max/models/attach.dart';
 import '../data/max/models/chat.dart';
 import '../data/max/models/message.dart';
-import '../data/max/models/push_event.dart';
 import '../data/max/models/upload_input.dart';
 import 'providers.dart';
 
@@ -60,13 +59,11 @@ final chatsListProvider =
   ChatsListController.new,
 );
 
-/// Глобальный поиск по тексту сообщений во всех чатах. Пустой запрос — пусто.
-final messageSearchProvider =
-    FutureProvider.family<List<MaxMessage>, String>((ref, query) async {
-  if (query.trim().isEmpty) return const [];
-  final db = await ref.watch(appDatabaseProvider.future);
-  return db.searchMessages(query);
-});
+/// Подсказка «этот chatId — диалог 1:1 с этим peerUserId», выставляется
+/// навигацией (ContactsScreen._openChat) ДО построения ChatHistoryController.
+/// Нужна, чтобы отправка в новый диалог шла по userId, а не по chatId.
+final dialogPeerHintProvider =
+    StateProvider.family<int?, int>((ref, chatId) => null);
 
 /// Сообщения конкретного чата. Если есть локальные - отдаём сразу,
 /// параллельно подтягиваем свежие с сервера.
@@ -86,7 +83,8 @@ class ChatHistoryController extends FamilyAsyncNotifier<List<MaxMessage>, int> {
     _sub?.cancel();
     _sub = repo.changedChats.where((c) => c == chatId).listen((_) => _reload());
     ref.onDispose(() => _sub?.cancel());
-    await chatsRepo.ensureExists(chatId);
+    final peerHint = ref.read(dialogPeerHintProvider(chatId));
+    await chatsRepo.ensureExists(chatId, peerUserId: peerHint);
     final local = await repo.localHistory(chatId);
     if (local.isEmpty) {
       unawaited(repo.syncHistory(chatId, count: 50));
@@ -202,30 +200,9 @@ class ChatHistoryController extends FamilyAsyncNotifier<List<MaxMessage>, int> {
       messageId: messageServerId,
     );
   }
-
-  /// Поставить реакцию-эмодзи на сообщение (op 178).
-  Future<void> react(int messageId, String emoji) async {
-    final repo = await ref.read(messagesRepositoryProvider.future);
-    await repo.react(_chatId, messageId, emoji);
-    await _reload();
-  }
-
-  /// Снять свою реакцию (op 179).
-  Future<void> cancelReact(int messageId) async {
-    final repo = await ref.read(messagesRepositoryProvider.future);
-    await repo.cancelReact(_chatId, messageId);
-    await _reload();
-  }
 }
 
 final chatHistoryProvider = AsyncNotifierProvider.family<
     ChatHistoryController, List<MaxMessage>, int>(
   ChatHistoryController.new,
 );
-
-/// Поток событий «печатает» для конкретного чата (push 129).
-final typingProvider =
-    StreamProvider.family<MaxPushEvent, int>((ref, chatId) async* {
-  final repo = await ref.watch(messagesRepositoryProvider.future);
-  yield* repo.typingEvents.where((e) => e.chatId == chatId);
-});

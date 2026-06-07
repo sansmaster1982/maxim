@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../data/max/models/chat.dart';
 import '../../data/max/models/contact.dart';
+import '../../state/chats_controller.dart';
 import '../../state/providers.dart';
 import '../theme/app_theme.dart';
 import 'media_gallery_screen.dart';
@@ -20,6 +22,7 @@ class ProfileScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final contactAsync = ref.watch(_contactProvider(chatId));
+    final localTitle = ref.watch(_chatProvider(chatId)).valueOrNull?.title;
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
@@ -30,7 +33,9 @@ class ProfileScreen extends ConsumerWidget {
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('Ошибка: $e')),
         data: (c) {
-          final displayName = c?.name ?? title ?? 'Чат $chatId';
+          final displayName = (localTitle != null && localTitle.isNotEmpty)
+              ? localTitle
+              : (c?.name ?? title ?? 'Чат $chatId');
           final phone = c?.phone;
           return ListView(
             children: [
@@ -100,6 +105,13 @@ class ProfileScreen extends ConsumerWidget {
                 ],
               ),
               const SizedBox(height: 24),
+              const Divider(height: 0),
+              ListTile(
+                leading: const Icon(Icons.drive_file_rename_outline),
+                title: const Text('Изменить имя'),
+                subtitle: const Text('Как этот контакт виден у тебя'),
+                onTap: () => _editName(context, ref, displayName),
+              ),
               const Divider(height: 0),
               ListTile(
                 leading: const Icon(Icons.collections_outlined),
@@ -194,6 +206,41 @@ class ProfileScreen extends ConsumerWidget {
       SnackBar(content: Text('$name: в разработке')),
     );
   }
+
+  Future<void> _editName(
+    BuildContext context,
+    WidgetRef ref,
+    String current,
+  ) async {
+    final ctrl = TextEditingController(text: current);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Имя контакта'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(labelText: 'Имя'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()),
+            child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty) return;
+    final db = await ref.read(appDatabaseProvider.future);
+    await db.setChatLocalName(chatId, newName);
+    ref.invalidate(_chatProvider(chatId));
+    ref.read(chatsListProvider.notifier).refresh();
+  }
 }
 
 class _ActionTile extends StatelessWidget {
@@ -244,4 +291,9 @@ class _ActionTile extends StatelessWidget {
 final _contactProvider = FutureProvider.family<MaxContact?, int>((ref, id) async {
   final db = await ref.watch(appDatabaseProvider.future);
   return db.contact(id);
+});
+
+final _chatProvider = FutureProvider.family<MaxChat?, int>((ref, id) async {
+  final db = await ref.watch(appDatabaseProvider.future);
+  return db.chat(id);
 });

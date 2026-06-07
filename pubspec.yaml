@@ -1,7 +1,7 @@
 name: maxim_messenger
 description: "Maxim - кросс-платформенный клиент мессенджера MAX"
 publish_to: 'none'
-version: 0.2.9+1
+version: 0.2.10+1
 
 environment:
   sdk: ^3.7.2

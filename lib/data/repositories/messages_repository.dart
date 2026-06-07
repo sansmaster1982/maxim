@@ -928,7 +928,7 @@ class MessagesRepository {
             await db.reassignMessages(id, peer);
             await db.deleteChat(id);
           }
-          dialogPeers[peer] = peer;
+          if (!contactRow.nameLocked) dialogPeers[peer] = peer;
           count++;
           continue;
         }
@@ -947,10 +947,12 @@ class MessagesRepository {
       }
       await db.upsertChat(row);
       count++;
-      // Имя диалога всегда резолвим из профиля собеседника (op32): один запрос
-      // на синк, дёшево, и само-исцеляет неверные старые названия (напр. чаты,
-      // ошибочно названные своим именем до фикса myProfileId).
-      if (peer != null) dialogPeers[id] = peer;
+      // Имя диалога резолвим из профиля собеседника (op32): один запрос на синк,
+      // само-исцеляет неверные старые названия. Переименованные пользователем
+      // чаты (name_locked) исключаем — иначе синк перетрёт заданное имя.
+      if (peer != null && !(existing?.nameLocked ?? false)) {
+        dialogPeers[id] = peer;
+      }
     }
     _log.i('DIAG ingestChatList: $count чатов, к резолву имён '
         '${dialogPeers.length}');

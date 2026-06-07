@@ -220,6 +220,8 @@ class MessageBubble extends StatelessWidget {
         return Icons.done_all;
       case MessageStatus.failed:
         return Icons.error_outline;
+      case MessageStatus.rejected:
+        return Icons.block;
     }
   }
 }

@@ -378,6 +378,13 @@ class MaxClient {
   /// пропущен на обрыве: на каждом reconnect LOGIN отдаёт свежий lastMessage.
   Stream<List<dynamic>> get syncedChatsStream => _syncedChats.stream;
 
+  /// Кеш чатов последнего LOGIN — на случай гонки: LOGIN при восстановлении
+  /// сессии может прислать чаты ДО того, как репозиторий подпишется на
+  /// [syncedChatsStream] (broadcast роняет события без слушателя). Подписчик
+  /// дотягивает их через этот геттер в start().
+  List<dynamic>? _lastSyncedChats;
+  List<dynamic>? get lastSyncedChats => _lastSyncedChats;
+
   Future<Uint8List> login(String token) async {
     final f = await _request(MaxOp.login, {
       'token': token,
@@ -400,8 +407,9 @@ class MaxClient {
     final dec = f.decoded;
     if (dec is Map) {
       final chats = dec['chats'];
-      if (chats is List && chats.isNotEmpty && _syncedChats.hasListener) {
-        _syncedChats.add(chats);
+      if (chats is List && chats.isNotEmpty) {
+        _lastSyncedChats = chats; // кеш на случай гонки с подпиской
+        if (_syncedChats.hasListener) _syncedChats.add(chats);
       }
     }
     return f.body;

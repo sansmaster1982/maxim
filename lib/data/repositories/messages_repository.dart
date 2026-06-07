@@ -69,6 +69,12 @@ class MessagesRepository {
       (chats) => unawaited(_onSyncedChats(chats)),
       onError: (e) => _log.w('synced chats stream error: $e'),
     );
+    // Гонка: LOGIN мог прислать чаты ДО этой подписки (broadcast их уронил при
+    // отсутствии слушателя). Дотягиваем закешированные чаты последнего логина.
+    final cachedChats = client.lastSyncedChats;
+    if (cachedChats != null && cachedChats.isNotEmpty) {
+      unawaited(_onSyncedChats(cachedChats));
+    }
     // Если на момент start транспорт уже connected — дренаж тоже отложенный.
     if (client.currentState == MaxConnectionState.connected) {
       Future.microtask(drainOutbox);

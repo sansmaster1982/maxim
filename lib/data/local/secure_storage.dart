@@ -31,6 +31,18 @@ class SecureStorage {
   Future<void> deleteMyUserId() =>
       _backend.delete(key: AppMeta.prefMyUserIdKey);
 
+  /// userId аккаунта, под которым последний раз синхронизировали список чатов.
+  /// Если при входе он изменился — локальную базу чатов надо очистить, иначе
+  /// чаты прежнего аккаунта остаются в списке. НЕ стирается в wipe() (нужен,
+  /// чтобы поймать смену; перезаписывается синком).
+  Future<int?> readLastSyncedAccountId() async {
+    final v = await _backend.read(key: 'last_synced_account_id');
+    return v == null ? null : int.tryParse(v);
+  }
+
+  Future<void> writeLastSyncedAccountId(int id) =>
+      _backend.write(key: 'last_synced_account_id', value: '$id');
+
   /// Тип устройства, под которым выдан токен: 'web' (веб-токен из
   /// web.max.ru) или 'android' (вход по SMS). Нужно чтобы при восстановлении
   /// сессии слать серверу тот же deviceType — иначе токен не примут.

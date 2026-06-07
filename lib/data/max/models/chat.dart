@@ -18,6 +18,10 @@ class MaxChat extends Equatable {
   /// != null ⇒ подтверждённый серверный chatId (маршрут отправки op 64).
   final int? serverChatId;
 
+  /// true ⇒ имя задано пользователем (переименование собеседника) — синк имён
+  /// (op32) его не перетирает.
+  final bool nameLocked;
+
   const MaxChat({
     required this.id,
     this.title,
@@ -31,6 +35,7 @@ class MaxChat extends Equatable {
     this.isMuted = false,
     this.peerUserId,
     this.serverChatId,
+    this.nameLocked = false,
   });
 
   bool get isDialog => peerUserId != null;
@@ -48,6 +53,7 @@ class MaxChat extends Equatable {
     bool? isMuted,
     int? peerUserId,
     int? serverChatId,
+    bool? nameLocked,
   }) {
     return MaxChat(
       id: id ?? this.id,
@@ -62,6 +68,7 @@ class MaxChat extends Equatable {
       isMuted: isMuted ?? this.isMuted,
       peerUserId: peerUserId ?? this.peerUserId,
       serverChatId: serverChatId ?? this.serverChatId,
+      nameLocked: nameLocked ?? this.nameLocked,
     );
   }
 
@@ -78,6 +85,7 @@ class MaxChat extends Equatable {
     'is_muted': isMuted ? 1 : 0,
     'peer_user_id': peerUserId,
     'server_chat_id': serverChatId,
+    'name_locked': nameLocked ? 1 : 0,
   };
 
   factory MaxChat.fromDbRow(Map<String, Object?> r) => MaxChat(
@@ -93,6 +101,7 @@ class MaxChat extends Equatable {
     isMuted: (r['is_muted'] as int? ?? 0) == 1,
     peerUserId: (r['peer_user_id'] as num?)?.toInt(),
     serverChatId: (r['server_chat_id'] as num?)?.toInt(),
+    nameLocked: (r['name_locked'] as int? ?? 0) == 1,
   );
 
   @override
@@ -109,5 +118,6 @@ class MaxChat extends Equatable {
     isMuted,
     peerUserId,
     serverChatId,
+    nameLocked,
   ];
 }

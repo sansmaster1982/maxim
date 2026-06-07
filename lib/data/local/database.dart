@@ -21,7 +21,7 @@ class AppDatabase {
     final path = p.join(dir.path, AppMeta.dbName);
     final db = await openDatabase(
       path,
-      version: 8,
+      version: 9,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -105,6 +105,13 @@ class AppDatabase {
         'CREATE INDEX IF NOT EXISTS idx_chats_server ON chats(server_chat_id)',
       );
     }
+    if (oldVersion < 9) {
+      // Кастомное имя контакта (локальный override): name_locked=1 → синк имён
+      // (op32) больше не перетирает заданное пользователем имя чата.
+      await db.execute(
+        'ALTER TABLE chats ADD COLUMN name_locked INTEGER NOT NULL DEFAULT 0',
+      );
+    }
   }
 
   static Future<void> _createAttachmentsTable(Database db) async {
@@ -157,7 +164,8 @@ class AppDatabase {
         is_archived INTEGER NOT NULL DEFAULT 0,
         is_muted INTEGER NOT NULL DEFAULT 0,
         peer_user_id INTEGER,
-        server_chat_id INTEGER
+        server_chat_id INTEGER,
+        name_locked INTEGER NOT NULL DEFAULT 0
       )
     ''');
     await db.execute('''
@@ -296,6 +304,17 @@ class AppDatabase {
       {'chat_id': toChatId},
       where: 'chat_id = ?',
       whereArgs: [fromChatId],
+    );
+  }
+
+  /// Локальное переименование собеседника: задаёт title и ставит name_locked=1,
+  /// чтобы синк имён (op32) больше не перетирал заданное пользователем имя.
+  Future<void> setChatLocalName(int id, String title) async {
+    await _db.update(
+      'chats',
+      {'title': title, 'name_locked': 1},
+      where: 'id = ?',
+      whereArgs: [id],
     );
   }
 

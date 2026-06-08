@@ -2,9 +2,9 @@
 
 [![TestFlight](https://img.shields.io/badge/TestFlight-установить%20на%20iPhone-0D96F6?style=for-the-badge&logo=apple&logoColor=white)](https://testflight.apple.com/join/CFEaJe8h)
 
-[![Donate Bitcoin](https://img.shields.io/badge/донат-Bitcoin-f7931a?style=for-the-badge&logo=bitcoin&logoColor=white)](#поддержать-проект)
-[![Donate Ethereum](https://img.shields.io/badge/донат-Ethereum-627eea?style=for-the-badge&logo=ethereum&logoColor=white)](#поддержать-проект)
-[![Donate USDT TRC20](https://img.shields.io/badge/донат-USDT%20TRC--20-26a17b?style=for-the-badge&logo=tether&logoColor=white)](#поддержать-проект)
+[![Bitcoin](https://img.shields.io/badge/Bitcoin-f7931a?style=for-the-badge&logo=bitcoin&logoColor=white)](#поддержать-проект)
+[![Ethereum](https://img.shields.io/badge/Ethereum-627eea?style=for-the-badge&logo=ethereum&logoColor=white)](#поддержать-проект)
+[![USDT TRC-20](https://img.shields.io/badge/USDT%20TRC--20-26a17b?style=for-the-badge&logo=tether&logoColor=white)](#поддержать-проект)
 
 > Проект развивается силами одного человека, без бюджета и без Mac. Если он полезен — [поддержать криптой](#поддержать-проект) (BTC / ETH / USDT). Это напрямую ускорит видеозвонки и шифрование.
 

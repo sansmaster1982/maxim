@@ -1,4 +1,2 @@
-# Кнопка «Sponsor» в шапке репозитория. GitHub Sponsors напрямую крипту не
-# поддерживает, поэтому ведём на раздел «Поддержать проект» в README с
-# адресами BTC / ETH / TRC-20.
-custom: ["https://github.com/sansmaster1982/maxim#поддержать-проект"]
+# Bank card donations via YooMoney; cryptocurrency options are in the README.
+custom: ["https://yoomoney.ru/to/410011004366707", "https://github.com/sansmaster1982/maxim#поддержать-проект"]
